@@ -1,6 +1,6 @@
 import os
 from threading import Thread
-from flask import Flask, render_template, request
+from flask import Flask, render_template_string, request
 import discord
 
 # --- CONFIGURATION FLASK & PAGE D'OVERLAY ---
@@ -145,9 +145,8 @@ async def on_message(message):
 
 # --- LANCEMENT GLOBAL ---
 if __name__ == "__main__":
-    # Lancement du serveur web en arrière-plan
     keep_alive()
-    # Lancement du bot Discord
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
         client.run(TOKEN)
+

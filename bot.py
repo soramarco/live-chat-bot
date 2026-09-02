@@ -1,18 +1,18 @@
 import os
 from threading import Thread
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string
 import discord
+from collections import deque
 
 # --- CONFIGURATION FLASK & PAGE D'OVERLAY ---
 app = Flask(__name__)
 
-# Variables globales pour stocker le mème, l'auteur, sa photo et l'état du live
-latest_meme_url = ""
-latest_author_name = ""
-latest_author_avatar = ""
+# File d'attente globale pour stocker les mèmes/vidéos à venir
+meme_queue = deque()
+current_meme = None
 live_chat_active = False
 
-# Page web avec le design intégrant l'image, le pseudo et la photo de profil
+# Page web avec fond transparent et gestion dynamique de la file d'attente
 OVERLAY_HTML = """
 <!DOCTYPE html>
 <html>
@@ -24,7 +24,8 @@ OVERLAY_HTML = """
         .author-box { display: flex; align-items: center; background: rgba(0, 0, 0, 0.75); padding: 8px 16px; border-radius: 20px; margin-bottom: 10px; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
         .author-box img { width: 32px; height: 32px; border-radius: 50%; margin-right: 10px; object-fit: cover; }
         .author-box span { font-size: 16px; font-weight: bold; }
-        #meme-img { max-width: 100%; max-height: 75vh; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        #media-container { max-width: 100%; max-height: 75vh; }
+        #meme-img, #meme-video { max-width: 100%; max-height: 75vh; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); display: none; }
     </style>
 </head>
 <body>
@@ -33,31 +34,60 @@ OVERLAY_HTML = """
             <img id="author-avatar" src="" alt="Avatar">
             <span id="author-name"></span>
         </div>
-        <div>
+        <div id="media-container">
             <img id="meme-img" src="" alt="">
+            <video id="meme-video" src="" autoplay></video>
         </div>
     </div>
     <script>
-        setInterval(async () => {
+        let isDisplaying = false;
+
+        async function pollQueue() {
+            if (isDisplaying) return;
             try {
-                let res = await fetch('/get_meme');
+                let res = await fetch('/get_next_meme');
                 let data = await res.json();
-                let img = document.getElementById('meme-img');
-                let authorBox = document.getElementById('author-box');
-                let authorAvatar = document.getElementById('author-avatar');
-                let authorName = document.getElementById('author-name');
 
                 if (data.url) {
-                    img.src = data.url;
+                    isDisplaying = true;
+                    let authorBox = document.getElementById('author-box');
+                    let authorAvatar = document.getElementById('author-avatar');
+                    let authorName = document.getElementById('author-name');
+                    let img = document.getElementById('meme-img');
+                    let video = document.getElementById('meme-video');
+
                     authorAvatar.src = data.avatar;
                     authorName.innerText = data.name;
                     authorBox.style.display = 'flex';
-                } else {
-                    img.src = "";
-                    authorBox.style.display = 'none';
+
+                    let isVideo = data.url.endsWith('.mp4') || data.url.endsWith('.webm') || data.url.endsWith('.mov');
+
+                    if (isVideo) {
+                        video.src = data.url;
+                        video.style.display = 'block';
+                        img.style.display = 'none';
+                        video.onended = () => hideMedia();
+                    } else {
+                        img.src = data.url;
+                        img.style.display = 'block';
+                        video.style.display = 'none';
+                        // L'image reste affichée 8 secondes avant de disparaître
+                        setTimeout(() => hideMedia(), 8000);
+                    }
                 }
             } catch (e) { console.error(e); }
-        }, 2000);
+        }
+
+        function hideMedia() {
+            document.getElementById('author-box').style.display = 'none';
+            document.getElementById('meme-img').style.display = 'none';
+            document.getElementById('meme-video').style.display = 'none';
+            document.getElementById('meme-img').src = '';
+            document.getElementById('meme-video').src = '';
+            isDisplaying = false;
+        }
+
+        setInterval(pollQueue, 1500);
     </script>
 </body>
 </html>
@@ -71,15 +101,18 @@ def home():
 def overlay():
     return render_template_string(OVERLAY_HTML)
 
-@app.route('/get_meme')
-def get_meme():
-    global latest_meme_url, latest_author_name, latest_author_avatar, live_chat_active
-    if not live_chat_active:
+@app.route('/get_next_meme')
+def get_next_meme():
+    global live_chat_active, meme_queue
+    if not live_chat_active or not meme_queue:
         return {"url": "", "name": "", "avatar": ""}
+    
+    # Récupère le prochain mème de la file d'attente
+    item = meme_queue.popleft()
     return {
-        "url": latest_meme_url,
-        "name": latest_author_name,
-        "avatar": latest_author_avatar
+        "url": item["url"],
+        "name": item["name"],
+        "avatar": item["avatar"]
     }
 
 def run():
@@ -105,7 +138,7 @@ class LiveChatControlView(discord.ui.View):
 
     @discord.ui.button(label="Activer/Désactiver", style=discord.ButtonStyle.primary)
     async def toggle_callback(self, interaction: discord.Interaction, button: discord.Button):
-        global live_chat_active, latest_meme_url
+        global live_chat_active, meme_queue
         live_chat_active = not live_chat_active
 
         if live_chat_active:
@@ -114,7 +147,7 @@ class LiveChatControlView(discord.ui.View):
         else:
             status_text = "🔴 Le Live Chat est INACTIF. Vous pouvez envoyer des mèmes, mais ils ne s'affichent pas."
             button.style = discord.ButtonStyle.secondary
-            latest_meme_url = ""
+            meme_queue.clear()
 
         await interaction.response.edit_message(content=status_text, view=self)
 
@@ -126,6 +159,7 @@ async def on_ready():
             if channel.name == CHANNEL_NAME:
                 global live_chat_active
                 live_chat_active = False
+                meme_queue.clear()
                 view = LiveChatControlView()
                 await channel.send("🔴 Le Live Chat est INACTIF. Vous pouvez envoyer des mèmes, mais ils ne s'affichent pas.", view=view)
 
@@ -137,10 +171,13 @@ async def on_message(message):
     if message.channel.name == CHANNEL_NAME:
         if live_chat_active:
             if message.attachments:
-                global latest_meme_url, latest_author_name, latest_author_avatar
-                latest_meme_url = message.attachments[0].url
-                latest_author_name = message.author.display_name
-                latest_author_avatar = message.author.display_avatar.url
+                global meme_queue
+                meme_data = {
+                    "url": message.attachments[0].url,
+                    "name": message.author.display_name,
+                    "avatar": message.author.display_avatar.url
+                }
+                meme_queue.append(meme_data)
 
 
 # --- LANCEMENT GLOBAL ---

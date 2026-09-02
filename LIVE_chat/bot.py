@@ -1,12 +1,10 @@
 import os
-import requests
-import discord
-from discord.ext import commands
-from flask import Flask
 from threading import Thread
+from flask import Flask, request
+import discord
 
-# --- CONFIGURATION DU SERVEUR WEB (KEEP ALIVE) ---
-app = Flask('')
+# --- CONFIGURATION FLASK (POUR RENDER & KEEP-ALIVE) ---
+app = Flask(__name__)
 
 @app.route('/')
 def home():
@@ -14,19 +12,19 @@ def home():
 
 def run():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- TON CODE DE BOT DISCORD ---
+# --- CONFIGURATION DU BOT DISCORD ---
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-CHANNEL_NAME = "general" # Remplace par le nom de ton salon si besoin
-SERVER_URL = "https://frail-astute-breeching.ngrok-free.dev" # Modifiable si tu utilises ngrok plus tard pour l'overlay local
+CHANNEL_NAME = "live-chat"  # Nom de ton salon
+SERVER_URL = "https://frail-astute-breeching.ngrok-free.dev"  # Ton lien ngrok actuel
 live_chat_active = False
 
 class StopButtonView(discord.ui.View):
@@ -34,7 +32,7 @@ class StopButtonView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Arrêter la lecture", style=discord.ButtonStyle.danger)
-    async def stop_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def stop_callback(self, interaction: discord.Interaction, button: discord.Button):
         global live_chat_active
         live_chat_active = False
         await interaction.response.send_message("Arrêt de la lecture des mèmes demandé.", ephemeral=True)
@@ -44,49 +42,50 @@ class LiveChatControlView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Activer/Désactiver", style=discord.ButtonStyle.primary)
-    async def toggle_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        pass
+    async def toggle_callback(self, interaction: discord.Interaction, button: discord.Button):
+        global live_chat_active
+        live_chat_active = not live_chat_active
+        
+        if live_chat_active:
+            status_text = "🟢 Le Live Chat est ACTIF ! Les mèmes s'affichent sur l'écran."
+            button.style = discord.ButtonStyle.success
+        else:
+            status_text = "🔴 Le Live Chat est INACTIF. Vous pouvez envoyer des mèmes, mais ils ne s'affichent pas."
+            button.style = discord.ButtonStyle.secondary
+            
+        await interaction.response.edit_message(content=status_text, view=self)
 
 @client.event
 async def on_ready():
     print(f"Connecté en tant que {client.user}")
+    for guild in client.guilds:
+        for channel in guild.text_channels:
+            if channel.name == CHANNEL_NAME:
+                live_chat_active = False
+                view = LiveChatControlView()
+                await channel.send("🔴 Le Live Chat est INACTIF. Vous pouvez envoyer des mèmes, mais ils ne s'affichent pas.", view=view)
 
 @client.event
 async def on_message(message):
-    global live_chat_active
-
-    if message.author.bot:
+    if message.author == client.user:
         return
 
-    if message.content.startswith("!setup_live") and message.channel.name == CHANNEL_NAME:
-        view = LiveChatControlView()
-        sent_msg = await message.channel.send("🔴 Le live Chat est INACTIF.** Vous pouvez envoyer des mèmes, mais ils ne s'affichent pas.", view=view)
-        try:
-            await sent_msg.pin()
-            await message.delete()
-        except Exception:
-            pass
-        return
+    if message.channel.name == CHANNEL_NAME:
+        if live_chat_active:
+            # Vérifie si le message contient une image ou une pièce jointe
+            if message.attachments:
+                image_url = message.attachments[0].url
+                
+                # Envoi des données vers ton PC via ngrok
+                import requests
+                try:
+                    requests.post(f"{SERVER_URL}/send_meme", json={"url": image_url})
+                except Exception as e:
+                    print(f"Erreur d'envoi vers le serveur local : {e}")
 
-    if message.channel.name == CHANNEL_NAME and message.attachments:
-        if not live_chat_active:
-            return
-
-        sent_msg = await message.reply("En cours de lecture...", view=StopButtonView())
-        data = {
-            "url": message.attachments[0].url,
-            "caption": message.content,
-            "author_name": message.author.display_name,
-            "author_avatar": str(message.author.avatar.url) if message.author.avatar else "",
-            "channel_id": sent_msg.channel.id,
-            "message_id": sent_msg.id
-        }
-        try:
-            requests.post(f"{SERVER_URL}/send_meme", json=data, timeout=3)
-        except Exception as e:
-            print(f"Erreur envoi serveur : {e}")
-
-# Lancement du serveur web pour Render puis du bot Discord
+# Lancement du serveur web Keep-Alive pour Render
 keep_alive()
+
+# Lancement du bot Discord
 TOKEN = os.environ.get("DISCORD_TOKEN")
 client.run(TOKEN)

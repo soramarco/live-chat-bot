@@ -26,7 +26,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 CHANNEL_NAME = "general" # Remplace par le nom de ton salon si besoin
-SERVER_URL = "http://127.0.0.1:5000" # Modifiable si tu utilises ngrok plus tard pour l'overlay local
+SERVER_URL = "https://frail-astute-breeching.ngrok-free.dev" # Modifiable si tu utilises ngrok plus tard pour l'overlay local
 live_chat_active = False
 
 class StopButtonView(discord.ui.View):

@@ -6,38 +6,59 @@ import discord
 # --- CONFIGURATION FLASK & PAGE WEB D'OVERLAY ---
 app = Flask(__name__)
 
-# Variable globale pour stocker le dernier mème et l'état du live
+# Variables globales pour stocker le mème, l'auteur, sa photo et l'état du live
 latest_meme_url = ""
+latest_author_name = ""
+latest_author_avatar = ""
 live_chat_active = False
 
-# Page web super simple affichée pour l'overlay de tout le monde
+# Page web avec le design intégrant l'image, le pseudo et la photo de profil
 OVERLAY_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>Live Chat Overlay</title>
     <style>
-        body { background-color: transparent; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
-        img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        body { background-color: transparent; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: sans-serif; }
+        .container { display: flex; flex-direction: column; align-items: center; max-width: 90%; max-height: 90%; }
+        .author-box { display: flex; align-items: center; background: rgba(0, 0, 0, 0.75); padding: 8px 16px; border-radius: 20px; margin-bottom: 10px; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+        .author-box img { width: 32px; height: 32px; border-radius: 50%; margin-right: 10px; object-fit: cover; }
+        .author-box span { font-size: 16px; font-weight: bold; }
+        #meme-img { max-width: 100%; max-height: 75vh; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
     </style>
     <script>
-        // Actualisation automatique toutes les 2 secondes pour récupérer le nouveau mème
         setInterval(async () => {
             try {
                 let res = await fetch('/get_meme');
                 let data = await res.json();
                 let img = document.getElementById('meme-img');
-                if (data.url && data.url !== img.src) {
-                    img.src = data.url;
-                } else if (!data.url) {
+                let authorBox = document.getElementById('author-box');
+                let authorAvatar = document.getElementById('author-avatar');
+                let authorName = document.getElementById('author-name');
+                
+                if (data.url) {
+                    if (data.url !== img.src) {
+                        img.src = data.url;
+                        authorAvatar.src = data.avatar;
+                        authorName.innerText = data.name;
+                        authorBox.style.display = 'flex';
+                    }
+                } else {
                     img.src = "";
+                    authorBox.style.display = 'none';
                 }
             } catch (e) { console.error(e); }
         }, 2000);
     </script>
 </head>
 <body>
-    <img id="meme-img" src="" alt="">
+    <div class="container">
+        <div id="author-box" class="author-box" style="display: none;">
+            <img id="author-avatar" src="" alt="Avatar">
+            <span id="author-name"></span>
+        </div>
+        <img id="meme-img" src="" alt="">
+    </div>
 </body>
 </html>
 """
@@ -52,18 +73,14 @@ def overlay():
 
 @app.route('/get_meme')
 def get_meme():
-    global latest_meme_url, live_chat_active
+    global latest_meme_url, latest_author_name, latest_author_avatar, live_chat_active
     if not live_chat_active:
-        return {"url": ""}
-    return {"url": latest_meme_url}
-
-@app.route('/send_meme', methods=['POST'])
-def receive_meme():
-    global latest_meme_url
-    data = request.json
-    if data and "url" in data:
-        latest_meme_url = data["url"]
-    return {"status": "success"}
+        return {"url": "", "name": "", "avatar": ""}
+    return {
+        "url": latest_meme_url,
+        "name": latest_author_name,
+        "avatar": latest_author_avatar
+    }
 
 def run():
     port = int(os.environ.get("PORT", 10000))
@@ -79,17 +96,6 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 CHANNEL_NAME = "live-chat"
-
-class StopButtonView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Arrêter la lecture", style=discord.ButtonStyle.danger)
-    async def stop_callback(self, interaction: discord.Interaction, button: discord.Button):
-        global live_chat_active, latest_meme_url
-        live_chat_active = False
-        latest_meme_url = ""
-        await interaction.response.send_message("Arrêt de la lecture des mèmes demandé.", ephemeral=True)
 
 class LiveChatControlView(discord.ui.View):
     def __init__(self):
@@ -129,8 +135,11 @@ async def on_message(message):
     if message.channel.name == CHANNEL_NAME:
         if live_chat_active:
             if message.attachments:
-                global latest_meme_url
+                global latest_meme_url, latest_author_name, latest_author_avatar
                 latest_meme_url = message.attachments[0].url
+                latest_author_name = message.author.display_name
+                # Récupère l'URL de la photo de profil Discord de l'auteur du message
+                latest_author_avatar = message.author.display_avatar.url
 
 # Lancement du serveur web sur Render
 keep_alive()

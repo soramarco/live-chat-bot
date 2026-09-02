@@ -1,9 +1,9 @@
 import os
 from threading import Thread
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template, request
 import discord
 
-# --- CONFIGURATION FLASK & PAGE WEB D'OVERLAY ---
+# --- CONFIGURATION FLASK & PAGE D'OVERLAY ---
 app = Flask(__name__)
 
 # Variables globales pour stocker le mème, l'auteur, sa photo et l'état du live
@@ -26,6 +26,17 @@ OVERLAY_HTML = """
         .author-box span { font-size: 16px; font-weight: bold; }
         #meme-img { max-width: 100%; max-height: 75vh; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
     </style>
+</head>
+<body>
+    <div class="container">
+        <div id="author-box" class="author-box" style="display: none;">
+            <img id="author-avatar" src="" alt="Avatar">
+            <span id="author-name"></span>
+        </div>
+        <div>
+            <img id="meme-img" src="" alt="">
+        </div>
+    </div>
     <script>
         setInterval(async () => {
             try {
@@ -35,14 +46,12 @@ OVERLAY_HTML = """
                 let authorBox = document.getElementById('author-box');
                 let authorAvatar = document.getElementById('author-avatar');
                 let authorName = document.getElementById('author-name');
-                
+
                 if (data.url) {
-                    if (data.url !== img.src) {
-                        img.src = data.url;
-                        authorAvatar.src = data.avatar;
-                        authorName.innerText = data.name;
-                        authorBox.style.display = 'flex';
-                    }
+                    img.src = data.url;
+                    authorAvatar.src = data.avatar;
+                    authorName.innerText = data.name;
+                    authorBox.style.display = 'flex';
                 } else {
                     img.src = "";
                     authorBox.style.display = 'none';
@@ -50,15 +59,6 @@ OVERLAY_HTML = """
             } catch (e) { console.error(e); }
         }, 2000);
     </script>
-</head>
-<body>
-    <div class="container">
-        <div id="author-box" class="author-box" style="display: none;">
-            <img id="author-avatar" src="" alt="Avatar">
-            <span id="author-name"></span>
-        </div>
-        <img id="meme-img" src="" alt="">
-    </div>
 </body>
 </html>
 """
@@ -88,7 +88,9 @@ def run():
 
 def keep_alive():
     t = Thread(target=run)
+    t.daemon = True
     t.start()
+
 
 # --- CONFIGURATION DU BOT DISCORD ---
 intents = discord.Intents.default()
@@ -105,7 +107,7 @@ class LiveChatControlView(discord.ui.View):
     async def toggle_callback(self, interaction: discord.Interaction, button: discord.Button):
         global live_chat_active, latest_meme_url
         live_chat_active = not live_chat_active
-        
+
         if live_chat_active:
             status_text = "🟢 Le Live Chat est ACTIF ! Les mèmes s'affichent sur l'écran."
             button.style = discord.ButtonStyle.success
@@ -113,12 +115,12 @@ class LiveChatControlView(discord.ui.View):
             status_text = "🔴 Le Live Chat est INACTIF. Vous pouvez envoyer des mèmes, mais ils ne s'affichent pas."
             button.style = discord.ButtonStyle.secondary
             latest_meme_url = ""
-            
+
         await interaction.response.edit_message(content=status_text, view=self)
 
 @client.event
 async def on_ready():
-    print(f"Connecté en tant que {client.user}")
+    print(f'Connecté en tant que {client.user}')
     for guild in client.guilds:
         for channel in guild.text_channels:
             if channel.name == CHANNEL_NAME:
@@ -138,12 +140,14 @@ async def on_message(message):
                 global latest_meme_url, latest_author_name, latest_author_avatar
                 latest_meme_url = message.attachments[0].url
                 latest_author_name = message.author.display_name
-                # Récupère l'URL de la photo de profil Discord de l'auteur du message
                 latest_author_avatar = message.author.display_avatar.url
 
-# Lancement du serveur web sur Render
-keep_alive()
 
-# Lancement du bot Discord
-TOKEN = os.environ.get("DISCORD_TOKEN")
-client.run(TOKEN)
+# --- LANCEMENT GLOBAL ---
+if __name__ == "__main__":
+    # Lancement du serveur web en arrière-plan
+    keep_alive()
+    # Lancement du bot Discord
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if TOKEN:
+        client.run(TOKEN)

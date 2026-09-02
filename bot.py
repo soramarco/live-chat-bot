@@ -7,12 +7,9 @@ from collections import deque
 # --- CONFIGURATION FLASK & PAGE D'OVERLAY ---
 app = Flask(__name__)
 
-# File d'attente globale pour stocker les mèmes/vidéos à venir
 meme_queue = deque()
-current_meme = None
 live_chat_active = False
 
-# Page web avec fond transparent et gestion dynamique de la file d'attente
 OVERLAY_HTML = """
 <!DOCTYPE html>
 <html>
@@ -36,7 +33,7 @@ OVERLAY_HTML = """
         </div>
         <div id="media-container">
             <img id="meme-img" src="" alt="">
-            <video id="meme-video" src="" autoplay></video>
+            <video id="meme-video" autoplay controls style="display:none;"></video>
         </div>
     </div>
     <script>
@@ -60,18 +57,20 @@ OVERLAY_HTML = """
                     authorName.innerText = data.name;
                     authorBox.style.display = 'flex';
 
-                    let isVideo = data.url.endsWith('.mp4') || data.url.endsWith('.webm') || data.url.endsWith('.mov');
+                    let lowerUrl = data.url.toLowerCase();
+                    let isVideo = lowerUrl.includes('.mp4') || lowerUrl.includes('.webm') || lowerUrl.includes('.mov');
 
                     if (isVideo) {
                         video.src = data.url;
                         video.style.display = 'block';
                         img.style.display = 'none';
+                        video.load();
+                        video.play().catch(e => console.log("Erreur lecture auto video:", e));
                         video.onended = () => hideMedia();
                     } else {
                         img.src = data.url;
                         img.style.display = 'block';
                         video.style.display = 'none';
-                        // L'image reste affichée 8 secondes avant de disparaître
                         setTimeout(() => hideMedia(), 8000);
                     }
                 }
@@ -81,9 +80,11 @@ OVERLAY_HTML = """
         function hideMedia() {
             document.getElementById('author-box').style.display = 'none';
             document.getElementById('meme-img').style.display = 'none';
-            document.getElementById('meme-video').style.display = 'none';
+            let video = document.getElementById('meme-video');
+            video.style.display = 'none';
+            video.pause();
+            video.src = '';
             document.getElementById('meme-img').src = '';
-            document.getElementById('meme-video').src = '';
             isDisplaying = false;
         }
 
@@ -107,7 +108,6 @@ def get_next_meme():
     if not live_chat_active or not meme_queue:
         return {"url": "", "name": "", "avatar": ""}
     
-    # Récupère le prochain mème de la file d'attente
     item = meme_queue.popleft()
     return {
         "url": item["url"],
@@ -142,10 +142,10 @@ class LiveChatControlView(discord.ui.View):
         live_chat_active = not live_chat_active
 
         if live_chat_active:
-            status_text = "🟢 Le Live Chat est ACTIF ! Les mèmes s'affichent sur l'écran."
+            status_text = "🟢 Le Live Chat est ACTIF ! Les mèmes et vidéos s'affichent."
             button.style = discord.ButtonStyle.success
         else:
-            status_text = "🔴 Le Live Chat est INACTIF. Vous pouvez envoyer des mèmes, mais ils ne s'affichent pas."
+            status_text = "🔴 Le Live Chat est INACTIF. Tout est mis en pause et la file est vidée."
             button.style = discord.ButtonStyle.secondary
             meme_queue.clear()
 
@@ -180,10 +180,8 @@ async def on_message(message):
                 meme_queue.append(meme_data)
 
 
-# --- LANCEMENT GLOBAL ---
 if __name__ == "__main__":
     keep_alive()
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
         client.run(TOKEN)
-

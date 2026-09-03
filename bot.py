@@ -11,10 +11,10 @@ media_queue = []
 current_active_item = None
 active_users = set()
 
-# Panneau de contrôle personnel (privé et temporaire pour éviter les blocages)
+# Panneau de contrôle personnel (privé et temporaire)
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active):
-        super().__init__(timeout=180)  # Timeout normal pour un message éphémère
+        super().__init__(timeout=180)
         self.is_active = is_active
         self.update_button_style()
 
@@ -80,7 +80,6 @@ async def on_ready():
     for guild in bot.guilds:
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
-                # Nettoie les anciens messages du bot pour repartir sur du propre
                 async for message in channel.history(limit=10):
                     if message.author == bot.user:
                         try:
@@ -209,6 +208,27 @@ def get_next_meme():
         })
     
     return jsonify({"url": None})
+
+# Nouvelle route pour consommer/fermer le média actuel après affichage (évite la boucle infinie)
+@app.route('/pop_meme', methods=['POST'])
+def pop_meme():
+    global current_active_item, media_queue
+    if current_active_item:
+        # Supprime le message de contrôle Discord associé si possible
+        try:
+            if current_active_item.get("control_message"):
+                asyncio.run_coroutine_threadsafe(current_active_item["control_message"].delete(), bot.loop)
+        except:
+            pass
+        
+        # Passe au suivant dans la file
+        if media_queue:
+            current_active_item = media_queue.pop(0)
+            asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
+        else:
+            current_active_item = None
+            
+    return jsonify({"status": "success"})
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))

@@ -87,7 +87,6 @@ class PersonalControlView(discord.ui.View):
         except Exception as e:
             print(f"Erreur mise à jour interaction : {e}")
 
-        # Met à jour automatiquement le message principal dans le salon
         asyncio.create_task(update_persistent_panel())
 
 class MainPanelView(discord.ui.View):
@@ -186,7 +185,6 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Republie le panneau tout en bas et met à jour la référence
         try:
             async for old_msg in message.channel.history(limit=30):
                 if old_msg.author == bot.user and "Panneau de contrôle du Live Chat" in old_msg.content:

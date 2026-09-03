@@ -9,22 +9,63 @@ app = Flask(__name__)
 
 media_queue = []
 current_active_item = None
-active_users = set()  # Stocke les utilisateurs ayant activé leur overlay
+active_users = set()  # Stocke les pseudos des utilisateurs qui ont activé leur overlay
 
-class ToggleView(discord.ui.View):
-    def __init__(self):
+# Panneau de contrôle personnel (privé pour chaque utilisateur)
+class PersonalControlView(discord.ui.View):
+    def __init__(self, is_active):
         super().__init__(timeout=None)
+        self.is_active = is_active
+        self.update_button_style()
 
-    @discord.ui.button(label="Activer / Désactiver", emoji="🟢", style=discord.ButtonStyle.green)
-    async def toggle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    def update_button_style(self):
+        if self.is_active:
+            self.toggle_btn.label = "Désactiver mon Live Chat"
+            self.toggle_btn.style = discord.ButtonStyle.danger
+            self.toggle_btn.emoji = "🔴"
+        else:
+            self.toggle_btn.label = "Activer mon Live Chat"
+            self.toggle_btn.style = discord.ButtonStyle.success
+            self.toggle_btn.emoji = "🟢"
+
+    @discord.ui.button(custom_id="personal_toggle_btn")
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         username = interaction.user.display_name
         
         if username in active_users:
             active_users.remove(username)
-            await interaction.response.send_message(f"🔴 **Live Chat désactivé** sur ton overlay.", ephemeral=True)
+            self.is_active = False
         else:
             active_users.add(username)
-            await interaction.response.send_message(f"🟢 **Live Chat activé** ! Ton overlay est prêt à recevoir les médias.", ephemeral=True)
+            self.is_active = True
+        
+        self.update_button_style()
+        
+        status_text = (
+            "🟢 **Ton Live Chat est ACTIF !** Les médias s'affichent sur ton PC." 
+            if self.is_active 
+            else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
+        )
+        await interaction.response.edit_message(content=status_text, view=self)
+
+# Bouton principal permanent dans le salon
+class MainPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn")
+    async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        username = interaction.user.display_name
+        is_active = username in active_users
+        
+        status_text = (
+            "🟢 **Ton Live Chat est ACTIF !** Les médias s'affichent sur ton PC." 
+            if is_active 
+            else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
+        )
+        
+        view = PersonalControlView(is_active)
+        await interaction.response.send_message(content=status_text, view=view, ephemeral=True)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -34,12 +75,17 @@ LIVE_CHANNEL_NAME = "live-chat"
 
 @bot.event
 async def on_ready():
-    print(f"Bot connecté en tant que {bot.user}")
+    print(f"Bot connecté en tantf que {bot.user}")
+    bot.add_view(MainPanelView())
     for guild in bot.guilds:
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
-                view = ToggleView()
-                await channel.send("🟢 **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour activer ou désactiver l'affichage des médias sur ton PC :", view=view)
+                # Vérifie si le message de base existe déjà pour éviter de le spammer à chaque redémarrage
+                async for message in channel.history(limit=50):
+                    if message.author == bot.user and "Panneau de contrôle" in message.content:
+                        return
+                view = MainPanelView()
+                await channel.send("🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :", view=view)
 
 @bot.event
 async def on_message(message):
@@ -141,7 +187,6 @@ def get_next_meme():
     
     user = request.args.get("user", "").strip()
     
-    # Si l'utilisateur n'a pas cliqué sur Activer sur Discord, l'overlay ne reçoit rien
     if not user or user not in active_users:
         return jsonify({"url": None})
 
@@ -150,7 +195,6 @@ def get_next_meme():
         asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
 
     if current_active_item:
-        # Empêche l'auteur de voir son propre média s'afficher sur son propre overlay
         if current_active_item["name"].lower() == user.lower():
             return jsonify({"url": None})
             
@@ -171,6 +215,9 @@ if __name__ == "__main__":
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
+    
+    TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
+    bot.run(TOKEN)
     
     TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
     bot.run(TOKEN)

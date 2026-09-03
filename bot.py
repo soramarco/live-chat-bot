@@ -29,7 +29,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v21")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v23")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -61,7 +61,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v21")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v23")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -96,7 +96,7 @@ async def on_ready():
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
                 try:
-                    # Nettoie les anciens panneaux pour s'assurer qu'il se remet tout en bas
+                    # Nettoie les anciens panneaux au démarrage
                     async for message in channel.history(limit=50):
                         if message.author == bot.user and "Panneau de contrôle du Live Chat" in message.content:
                             try:
@@ -119,6 +119,7 @@ async def on_message(message):
         return
         
     if message.channel.name == LIVE_CHANNEL_NAME:
+        # 1. Gestion des médias et médias envoyés
         media_url = ""
         if message.attachments:
             media_url = message.attachments[0].url
@@ -140,6 +141,9 @@ async def on_message(message):
             }
             
             with queue_lock:
+                if len(media_queue) > 20:
+                    media_queue.pop(0)
+
                 if current_active_item is None:
                     current_active_item = item
                     is_first = True
@@ -149,6 +153,22 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
+        # 2. Déplace et republie automatiquement le panneau de contrôle tout en bas à chaque message
+        try:
+            async for old_msg in message.channel.history(limit=30):
+                if old_msg.author == bot.user and "Panneau de contrôle du Live Chat" in old_msg.content:
+                    try:
+                        await old_msg.delete()
+                    except Exception:
+                        pass
+                    break
+            
+            view = MainPanelView()
+            content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
+            await message.channel.send(content_text, view=view)
+        except Exception as e:
+            print(f"Erreur déplacement panneau : {e}")
+
     await bot.process_commands(message)
 
 class ItemStopView(discord.ui.View):
@@ -157,7 +177,7 @@ class ItemStopView(discord.ui.View):
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v15")
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v17")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer()

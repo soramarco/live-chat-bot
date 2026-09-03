@@ -27,7 +27,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v8")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v9")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         username = interaction.user.display_name
@@ -54,7 +54,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v8")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v9")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         username = interaction.user.display_name
@@ -123,7 +123,6 @@ async def on_message(message):
                 "control_message": None
             }
             
-            # Si rien n'est en cours, cet item devient le courant direct
             if current_active_item is None:
                 current_active_item = item
                 bot.loop.create_task(send_control_message(item, is_active=True))
@@ -141,19 +140,17 @@ async def send_control_message(item, is_active):
                 self.item_ref = item_ref
                 self.stop_button.disabled = not active
 
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v2")
+            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v3")
             async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await interaction.response.defer()
                 global current_active_item, media_queue
                 
-                # Supprime le message de contrôle actuel
                 try:
                     if self.item_ref.get("control_message"):
                         await self.item_ref["control_message"].delete()
                 except Exception:
                     pass
                 
-                # Passe au suivant dans la file s'il y en a un
                 if current_active_item == self.item_ref:
                     if media_queue:
                         current_active_item = media_queue.pop(0)
@@ -175,7 +172,7 @@ async def activate_next_item_message(item):
                 super().__init__(timeout=None)
                 self.item_ref = item_ref
 
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_active_v2")
+            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_active_v3")
             async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await interaction.response.defer()
                 global current_active_item, media_queue

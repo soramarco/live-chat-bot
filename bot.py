@@ -96,6 +96,14 @@ async def on_ready():
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
                 try:
+                    # Nettoie les anciens panneaux pour s'assurer qu'il se remet tout en bas
+                    async for message in channel.history(limit=50):
+                        if message.author == bot.user and "Panneau de contrôle du Live Chat" in message.content:
+                            try:
+                                await message.delete()
+                            except Exception:
+                                pass
+                    
                     view = MainPanelView()
                     content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
                     await channel.send(content_text, view=view)
@@ -158,7 +166,6 @@ class ItemStopView(discord.ui.View):
             
         global current_active_item, media_queue
         with queue_lock:
-            # Le bouton Stop se contente de passer directement au suivant sans bug
             if current_active_item == self.item_ref:
                 try:
                     if self.item_ref.get("control_message"):

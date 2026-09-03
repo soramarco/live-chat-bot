@@ -18,11 +18,12 @@ OVERLAY_HTML = """
     <style>
         body { background-color: transparent; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: sans-serif; }
         .container { display: flex; flex-direction: column; align-items: center; max-width: 90%; max-height: 90%; }
-        .author-box { display: flex; align-items: center; background: rgba(0, 0, 0, 0.75); padding: 8px 16px; border-radius: 20px; margin-bottom: 10px; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
-        .author-box img { width: 32px; height: 32px; border-radius: 50%; margin-right: 10px; object-fit: cover; }
-        .author-box span { font-size: 16px; font-weight: bold; }
-        #media-container { max-width: 100%; max-height: 75vh; }
-        #meme-img, #meme-video { max-width: 100%; max-height: 75vh; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); display: none; }
+        .author-box { display: flex; align-items: center; background: rgba(15, 15, 15, 0.94); padding: 8px 16px; border-radius: 23px; margin-bottom: 12px; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+        .author-box img { width: 38px; height: 38px; border-radius: 50%; margin-right: 10px; object-fit: cover; }
+        .author-box span { font-size: 20px; font-weight: bold; }
+        #media-container { max-width: 100%; max-height: 65vh; display: flex; justify-content: center; }
+        #meme-img, #meme-video { max-width: 100%; max-height: 65vh; object-fit: contain; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); display: none; }
+        .text-box { background: rgba(0, 0, 0, 0.9); padding: 12px 24px; border-radius: 14px; margin-top: 12px; color: white; font-size: 26px; font-weight: bold; text-align: center; max-width: 1100px; word-break: break-word; box-shadow: 0 4px 15px rgba(0,0,0,0.4); display: none; }
     </style>
 </head>
 <body>
@@ -35,6 +36,7 @@ OVERLAY_HTML = """
             <img id="meme-img" src="" alt="">
             <video id="meme-video" autoplay controls style="display:none;"></video>
         </div>
+        <div id="text-box" class="text-box"></div>
     </div>
     <script>
         let isDisplaying = false;
@@ -52,10 +54,19 @@ OVERLAY_HTML = """
                     let authorName = document.getElementById('author-name');
                     let img = document.getElementById('meme-img');
                     let video = document.getElementById('meme-video');
+                    let textBox = document.getElementById('text-box');
 
                     authorAvatar.src = data.avatar;
                     authorName.innerText = data.name;
                     authorBox.style.display = 'flex';
+
+                    // Gestion du texte Discord en dessous
+                    if (data.content && data.content.trim() !== "") {
+                        textBox.innerText = data.content;
+                        textBox.style.display = 'block';
+                    } else {
+                        textBox.style.display = 'none';
+                    }
 
                     let lowerUrl = data.url.toLowerCase();
                     let isVideo = lowerUrl.includes('.mp4') || lowerUrl.includes('.webm') || lowerUrl.includes('.mov');
@@ -71,7 +82,7 @@ OVERLAY_HTML = """
                         img.src = data.url;
                         img.style.display = 'block';
                         video.style.display = 'none';
-                        setTimeout(() => hideMedia(), 8000);
+                        setTimeout(() => hideMedia(), 9000);
                     }
                 }
             } catch (e) { console.error(e); }
@@ -85,6 +96,7 @@ OVERLAY_HTML = """
             video.pause();
             video.src = '';
             document.getElementById('meme-img').src = '';
+            document.getElementById('text-box').style.display = 'none';
             isDisplaying = false;
         }
 
@@ -106,13 +118,14 @@ def overlay():
 def get_next_meme():
     global live_chat_active, meme_queue
     if not live_chat_active or not meme_queue:
-        return {"url": "", "name": "", "avatar": ""}
+        return {"url": "", "name": "", "avatar": "", "content": ""}
     
     item = meme_queue.popleft()
     return {
         "url": item["url"],
         "name": item["name"],
-        "avatar": item["avatar"]
+        "avatar": item["avatar"],
+        "content": item["content"]
     }
 
 def run():
@@ -175,7 +188,8 @@ async def on_message(message):
                 meme_data = {
                     "url": message.attachments[0].url,
                     "name": message.author.display_name,
-                    "avatar": message.author.display_avatar.url
+                    "avatar": message.author.display_avatar.url,
+                    "content": message.content  # <--- Récupération du texte du message !
                 }
                 meme_queue.append(meme_data)
 

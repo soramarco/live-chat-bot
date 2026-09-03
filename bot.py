@@ -1,4 +1,3 @@
-# bot.py
 import os
 import asyncio
 from threading import Thread
@@ -8,7 +7,7 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# File d'attente globale pour les médias du live chat
+# File d'attente globale et état actif
 media_queue = []
 current_active_item = None
 active_message = None
@@ -21,21 +20,16 @@ class StopView(discord.ui.View):
 
     @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        global current_active_item, active_message, active_view
+        global current_active_item, media_queue, active_message
         
-        # Désactiver le bouton
-        button.disabled = True
-        button.label = "Arrêté"
-        for child in self.children:
-            child.disabled = True
-            
+        # On supprime complètement le message de contrôle ou on enlève les boutons (view=None fait disparaître le bouton)
         try:
             if active_message:
-                await active_message.edit(view=self)
+                await active_message.edit(content="⏹️ **Média arrêté et skippé.**", view=None)
         except Exception:
             pass
             
-        # Forcer le passage au suivant
+        # On libère le média actuel pour que l'overlay passe au suivant de la file
         current_active_item = None
         
         await interaction.response.send_message("Média arrêté et skippé avec succès !", ephemeral=True)
@@ -44,7 +38,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-LIVE_CHANNEL_NAME = "live-chat"  # Nom du channel cible
+LIVE_CHANNEL_NAME = "live-chat"  # Ajuste si besoin
 
 @bot.event
 async def on_ready():
@@ -52,7 +46,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    global current_active_item, media_queue, active_message, active_view
+    global current_active_item, media_queue
     
     if message.author.bot:
         return
@@ -62,7 +56,6 @@ async def on_message(message):
         if message.attachments:
             media_url = message.attachments[0].url
         elif "http" in message.content:
-            # Extraction basique d'un lien si besoin
             words = message.content.split()
             for w in words:
                 if w.startswith("http"):
@@ -78,19 +71,19 @@ async def on_message(message):
                 "message_obj": message
             }
             media_queue.append(item)
-            print(f"[BOT] Média ajouté à la file d'attente : {item['name']}")
+            print(f"[BOT] Média ajouté à la file : {item['name']} (Total en attente: {len(media_queue)})")
 
     await bot.process_commands(message)
 
 @app.route('/get_next_meme', methods=['GET'])
 def get_next_meme():
-    global current_active_item, media_queue, active_message, active_view
+    global current_active_item, media_queue
     
-    # Si aucun média n'est en cours, on prend le suivant dans la file
+    # Si aucun média n'est en cours et qu'il y en a dans la file, on prend le suivant
     if current_active_item is None and media_queue:
         current_active_item = media_queue.pop(0)
         
-        # Envoyer le bouton interactif sur Discord de manière asynchrone dans la boucle du bot
+        # Envoi du bouton sur Discord pour ce nouveau média
         future = asyncio.run_coroutine_threadsafe(send_stop_button_to_discord(current_active_item), bot.loop)
         try:
             future.result(timeout=5)
@@ -114,14 +107,13 @@ async def send_stop_button_to_discord(item):
         active_view = StopView(bot)
         active_message = await msg.reply("🎬 **Média en cours de diffusion sur l'overlay...**", view=active_view)
     except Exception as e:
-        print(f"Impossible d'envoyer le bouton sur le message d'origine : {e}")
+        print(f"Impossible d'envoyer le bouton : {e}")
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    # Lancement du serveur web Flask en arrière-plan pour l'overlay
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()

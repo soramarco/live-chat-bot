@@ -134,6 +134,7 @@ async def on_ready():
                                 await message.delete()
                             except Exception:
                                 pass
+                            break
                     
                     view = MainPanelView()
                     main_panel_message = await channel.send(get_main_panel_content(), view=view)
@@ -301,6 +302,9 @@ if __name__ == "__main__":
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
+    
+    TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
+    bot.run(TOKEN)
     
     TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
     bot.run(TOKEN)

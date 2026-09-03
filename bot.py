@@ -73,7 +73,6 @@ async def on_message(message):
             is_first_ever = (current_active_item is None and len(media_queue) == 0)
             media_queue.append(item)
             
-            # Affichage INSTANTANÉ du bouton sous le message sans bloquer
             bot.loop.create_task(send_initial_button(item, is_active=is_first_ever))
 
     await bot.process_commands(message)
@@ -85,16 +84,18 @@ async def send_initial_button(item, is_active):
         msg = await item["message_obj"].reply(status_text, view=view)
         item["control_message"] = msg
     except Exception as e:
-        print(f"Impossible d'envoyer le bouton initial : %s" % e)
+        print(f"Impossible d'envoyer le bouton initial : {e}")
 
 @app.route('/get_next_meme', methods=['GET'])
 def get_next_meme():
     global current_active_item, media_queue
     
+    # 1. Si l'overlay demande le prochain et qu'aucun média n'est actif, on prend le premier de la file
     if current_active_item is None and media_queue:
         current_active_item = media_queue.pop(0)
         asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
 
+    # 2. Si on a un média actif, on le renvoie
     if current_active_item:
         return jsonify({
             "name": current_active_item["name"],
@@ -103,6 +104,8 @@ def get_next_meme():
             "url": current_active_item["url"]
         })
     
+    # 3. Si current_active_item est None (parce qu'on a cliqué sur Stop ou que c'est fini), 
+    # on renvoie explicitement un URL à None pour que l'overlay coupe l'affichage et passe au suivant.
     return jsonify({"url": None})
 
 async def activate_item_button(item):

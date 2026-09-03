@@ -14,9 +14,33 @@ current_active_item = None
 active_users = set()
 queue_lock = threading.Lock()
 
-# Cache global pour éviter de surcharger le serveur si 6-7 personnes demandent en même temps
+main_panel_message = None
+
 cached_response = {"data": {"url": None}, "timestamp": 0}
-CACHE_DURATION = 1.5  # Durée du cache en secondes pour absorber les requêtes simultanées
+CACHE_DURATION = 1.5
+
+def get_main_panel_content():
+    with queue_lock:
+        count = len(active_users)
+        if count == 0:
+            users_str = "_Personne_"
+        else:
+            users_str = ", ".join(f"**{u}**" for u in active_users)
+    return (
+        "🎛️ **Panneau de contrôle du Live Chat**\n"
+        f"📊 **Statut en direct** : {count} actif(s)\n"
+        f"👤 **Connectés** : {users_str}\n\n"
+        "Clique sur le bouton ci-dessous pour gérer ton affichage personnel :"
+    )
+
+async def update_persistent_panel():
+    global main_panel_message
+    if main_panel_message:
+        try:
+            view = MainPanelView()
+            await main_panel_message.edit(content=get_main_panel_content(), view=view)
+        except Exception as e:
+            print(f"Erreur mise à jour auto du panneau : {e}")
 
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active):
@@ -34,7 +58,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v24")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v25")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -57,16 +81,20 @@ class PersonalControlView(discord.ui.View):
             if self.is_active 
             else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
         )
+        
         try:
             await interaction.edit_original_response(content=status_text, view=self)
         except Exception as e:
             print(f"Erreur mise à jour interaction : {e}")
 
+        # Met à jour automatiquement le message principal dans le salon
+        asyncio.create_task(update_persistent_panel())
+
 class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v24")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v25")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -94,6 +122,7 @@ LIVE_CHANNEL_NAME = "live-chat"
 
 @bot.event
 async def on_ready():
+    global main_panel_message
     print(f"Bot connecté en tant que {bot.user}")
     bot.add_view(MainPanelView())
     
@@ -101,7 +130,6 @@ async def on_ready():
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
                 try:
-                    # Nettoie les anciens panneaux au démarrage
                     async for message in channel.history(limit=50):
                         if message.author == bot.user and "Panneau de contrôle du Live Chat" in message.content:
                             try:
@@ -110,15 +138,14 @@ async def on_ready():
                                 pass
                     
                     view = MainPanelView()
-                    content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
-                    await channel.send(content_text, view=view)
+                    main_panel_message = await channel.send(get_main_panel_content(), view=view)
                 except Exception as e:
                     print(f"Erreur envoi panneau initial : {e}")
                 break
 
 @bot.event
 async def on_message(message):
-    global current_active_item, media_queue, cached_response
+    global current_active_item, media_queue, cached_response, main_panel_message
     
     if message.author.bot:
         return
@@ -145,7 +172,6 @@ async def on_message(message):
             }
             
             with queue_lock:
-                # Sécurité stricte anti-saturation de la file d'attente
                 if len(media_queue) > 15:
                     media_queue.pop(0)
 
@@ -156,12 +182,11 @@ async def on_message(message):
                     media_queue.append(item)
                     is_first = False
                 
-                # Invalide le cache dès qu'un nouveau média arrive pour une mise à jour rapide
                 cached_response["timestamp"] = 0
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Republie le panneau tout en bas
+        # Republie le panneau tout en bas et met à jour la référence
         try:
             async for old_msg in message.channel.history(limit=30):
                 if old_msg.author == bot.user and "Panneau de contrôle du Live Chat" in old_msg.content:
@@ -172,8 +197,7 @@ async def on_message(message):
                     break
             
             view = MainPanelView()
-            content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
-            await message.channel.send(content_text, view=view)
+            main_panel_message = await message.channel.send(get_main_panel_content(), view=view)
         except Exception as e:
             print(f"Erreur déplacement panneau : {e}")
 
@@ -185,7 +209,7 @@ class ItemStopView(discord.ui.View):
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v18")
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v19")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer()
@@ -235,7 +259,6 @@ def get_next_meme():
 
     current_time = time.time()
     
-    # Utilisation du cache pour absorber les vagues de requêtes simultanées de 6-7+ utilisateurs
     with queue_lock:
         if current_time - cached_response["timestamp"] < CACHE_DURATION:
             res_data = cached_response["data"]

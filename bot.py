@@ -86,13 +86,11 @@ LIVE_CHANNEL_NAME = "live-chat"
 @bot.event
 async def on_ready():
     print(f"Bot connecté en tant que {bot.user}")
-    # Enregistre la vue de manière persistante
     bot.add_view(MainPanelView())
     
     for guild in bot.guilds:
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
-                # Nettoie les anciens messages du bot pour éviter d'accumuler des boutons morts
                 try:
                     async for message in channel.history(limit=10):
                         if message.author == bot.user and message.components:
@@ -100,7 +98,6 @@ async def on_ready():
                 except Exception as e:
                     print(f"Erreur nettoyage ancien panneau : {e}")
                 
-                # Envoie un tout nouveau panneau propre et fonctionnel
                 view = MainPanelView()
                 content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
                 await channel.send(content_text, view=view)
@@ -251,9 +248,6 @@ if __name__ == "__main__":
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
-    
-    TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
-    bot.run(TOKEN)
     
     TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
     bot.run(TOKEN)

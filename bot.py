@@ -58,7 +58,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v25")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v26")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -93,7 +93,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v25")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v26")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -207,7 +207,7 @@ class ItemStopView(discord.ui.View):
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v19")
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v26")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer()
@@ -256,29 +256,22 @@ def get_next_meme():
         return jsonify({"url": None})
 
     with queue_lock:
-        # Si l'utilisateur n'est plus actif, on renvoie un signal spécial "inactive" pour fermer l'overlay
         if user not in active_users:
             return jsonify({"url": None, "status": "inactive"})
 
-        current_time = time.time()
-        if current_time - cached_response["timestamp"] < CACHE_DURATION:
-            res_data = cached_response["data"]
+        # Si l'utilisateur est celui qui a posté la vidéo, on ne lui renvoie pas sa propre vidéo pour éviter qu'elle boucle
+        if current_active_item and current_active_item["name"].lower() == user.lower():
+            return jsonify({"url": None})
+
+        if current_active_item:
+            res_data = {
+                "name": current_active_item["name"],
+                "avatar": current_active_item["avatar"],
+                "content": current_active_item["content"],
+                "url": current_active_item["url"]
+            }
         else:
-            if current_active_item:
-                if current_active_item["name"].lower() == user.lower():
-                    res_data = {"url": None}
-                else:
-                    res_data = {
-                        "name": current_active_item["name"],
-                        "avatar": current_active_item["avatar"],
-                        "content": current_active_item["content"],
-                        "url": current_active_item["url"]
-                    }
-            else:
-                res_data = {"url": None}
-            
-            cached_response["data"] = res_data
-            cached_response["timestamp"] = current_time
+            res_data = {"url": None}
 
     return jsonify(res_data)
 

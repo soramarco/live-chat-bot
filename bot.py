@@ -29,17 +29,22 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v16")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v18")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+            
         username = interaction.user.display_name
         
-        if username in active_users:
-            active_users.remove(username)
-            self.is_active = False
-        else:
-            active_users.add(username)
-            self.is_active = True
+        with queue_lock:
+            if username in active_users:
+                active_users.remove(username)
+                self.is_active = False
+            else:
+                active_users.add(username)
+                self.is_active = True
         
         self.update_button_style()
         status_text = (
@@ -49,16 +54,20 @@ class PersonalControlView(discord.ui.View):
         )
         try:
             await interaction.edit_original_response(content=status_text, view=self)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Erreur mise à jour interaction : {e}")
 
 class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v16")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v18")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+            
         username = interaction.user.display_name
         is_active = username in active_users
         status_text = (
@@ -88,7 +97,7 @@ async def on_ready():
             if channel.name == LIVE_CHANNEL_NAME:
                 try:
                     async for message in channel.history(limit=10):
-                        if message.author == bot.user and message.components:
+                        if message.author == bot.user and message.components and "Panneau de contrôle" in message.content:
                             await message.delete()
                 except Exception as e:
                     print(f"Erreur nettoyage ancien panneau : {e}")
@@ -128,10 +137,12 @@ async def on_message(message):
             with queue_lock:
                 if current_active_item is None:
                     current_active_item = item
-                    bot.loop.create_task(send_control_message(item, is_active=True))
+                    is_first = True
                 else:
                     media_queue.append(item)
-                    bot.loop.create_task(send_control_message(item, is_active=False))
+                    is_first = False
+
+            bot.loop.create_task(send_control_message(item, is_active=is_first))
 
     await bot.process_commands(message)
 
@@ -141,9 +152,13 @@ class ItemStopView(discord.ui.View):
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v10")
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v12")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+            
         global current_active_item, media_queue
         with queue_lock:
             try:
@@ -166,7 +181,7 @@ async def send_control_message(item, is_active):
         msg = await item["message_obj"].reply(status_text, view=view)
         item["control_message"] = msg
     except Exception as e:
-        print(f"Erreur message de contrôle : {e}")
+        print(f"Erreur critique en envoyant le message de contrôle : {e}")
 
 async def activate_next_item_message(item):
     try:

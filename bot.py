@@ -29,7 +29,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v18")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v19")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -61,7 +61,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v18")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v19")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -92,19 +92,17 @@ async def on_ready():
     print(f"Bot connecté en tant que {bot.user}")
     bot.add_view(MainPanelView())
     
+    # Envoi direct allégé pour supprimer les requêtes d'historique et éviter le code 429
     for guild in bot.guilds:
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
                 try:
-                    async for message in channel.history(limit=10):
-                        if message.author == bot.user and message.components and "Panneau de contrôle" in message.content:
-                            await message.delete()
+                    view = MainPanelView()
+                    content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
+                    await channel.send(content_text, view=view)
                 except Exception as e:
-                    print(f"Erreur nettoyage ancien panneau : {e}")
-                
-                view = MainPanelView()
-                content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
-                await channel.send(content_text, view=view)
+                    print(f"Erreur envoi panneau initial : {e}")
+                break
 
 @bot.event
 async def on_message(message):
@@ -152,7 +150,7 @@ class ItemStopView(discord.ui.View):
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v12")
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v13")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer()

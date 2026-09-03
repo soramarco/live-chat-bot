@@ -202,11 +202,11 @@ async def on_message(message):
 
 class ItemStopView(discord.ui.View):
     def __init__(self, item_ref, active):
-        super().__init__(timeout=None)
+        super().__init__(timeout=86400)  # Corrigé : timeout de 24h au lieu de None pour éviter le blocage des clics
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v26")
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer()
@@ -257,9 +257,6 @@ def get_next_meme():
     with queue_lock:
         if user not in active_users:
             return jsonify({"url": None, "status": "inactive"})
-
-        # La condition qui bloquait l'auteur a été supprimée : 
-        # tu reçois désormais ton propre média sur ton overlay.
 
         if current_active_item:
             res_data = {

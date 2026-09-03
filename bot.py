@@ -12,10 +12,10 @@ app = Flask(__name__)
 media_queue = []
 current_active_item = None
 active_users = set()
+user_positions = {}  # Stocke "left", "center", "right" par utilisateur
 queue_lock = threading.Lock()
 
 main_panel_message = None
-
 cached_response = {"data": {"url": None}, "timestamp": 0}
 
 def get_main_panel_content():
@@ -29,7 +29,7 @@ def get_main_panel_content():
         "🎛️ **Panneau de contrôle du Live Chat**\n"
         f"📊 **Statut en direct** : {count} actif(s)\n"
         f"👤 **Connectés** : {users_str}\n\n"
-        "Clique sur le bouton ci-dessous pour gérer ton affichage personnel :"
+        "Clique sur le bouton ci-dessous pour gérer ton affichage et ta position :"
     )
 
 async def update_persistent_panel():
@@ -42,12 +42,13 @@ async def update_persistent_panel():
             print(f"Erreur mise à jour auto du panneau : {e}")
 
 class PersonalControlView(discord.ui.View):
-    def __init__(self, is_active):
+    def __init__(self, is_active, username):
         super().__init__(timeout=180)
         self.is_active = is_active
-        self.update_button_style()
+        self.username = username
+        self.update_button_styles()
 
-    def update_button_style(self):
+    def update_button_styles(self):
         if self.is_active:
             self.toggle_btn.label = "Désactiver mon Live Chat"
             self.toggle_btn.style = discord.ButtonStyle.danger
@@ -57,26 +58,29 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v26")
+        pos = user_positions.get(self.username, "center")
+        self.btn_left.style = discord.ButtonStyle.primary if pos == "left" else discord.ButtonStyle.secondary
+        self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
+        self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
+
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v28", row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
             
-        username = interaction.user.display_name
-        
         with queue_lock:
-            if username in active_users:
-                active_users.remove(username)
+            if self.username in active_users:
+                active_users.remove(self.username)
                 self.is_active = False
             else:
-                active_users.add(username)
+                active_users.add(self.username)
                 self.is_active = True
         
-        self.update_button_style()
+        self.update_button_styles()
         status_text = (
-            "🟢 **Ton Live Chat est ACTIF !** Les médias s'affichent sur ton PC." 
+            f"🟢 **Ton Live Chat est ACTIF !** Position : **{user_positions.get(self.username, 'center').upper()}**" 
             if self.is_active 
             else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
         )
@@ -88,11 +92,55 @@ class PersonalControlView(discord.ui.View):
 
         asyncio.create_task(update_persistent_panel())
 
+    @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        with queue_lock:
+            user_positions[self.username] = "left"
+        self.update_button_styles()
+        await self.update_response(interaction)
+
+    @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1)
+    async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        with queue_lock:
+            user_positions[self.username] = "center"
+        self.update_button_styles()
+        await self.update_response(interaction)
+
+    @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+        with queue_lock:
+            user_positions[self.username] = "right"
+        self.update_button_styles()
+        await self.update_response(interaction)
+
+    async def update_response(self, interaction):
+        status_text = (
+            f"🟢 **Ton Live Chat est ACTIF !** Position : **{user_positions.get(self.username, 'center').upper()}**" 
+            if self.is_active 
+            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position réglée sur : **{user_positions.get(self.username, 'center').upper()}**"
+        )
+        try:
+            await interaction.edit_original_response(content=status_text, view=self)
+        except Exception as e:
+            print(f"Erreur mise à jour position : {e}")
+
 class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v26")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v28")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -101,12 +149,14 @@ class MainPanelView(discord.ui.View):
             
         username = interaction.user.display_name
         is_active = username in active_users
+        current_pos = user_positions.get(username, "center")
+        
         status_text = (
-            "🟢 **Ton Live Chat est ACTIF !** Les médias s'affichent sur ton PC." 
+            f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos.upper()}**" 
             if is_active 
-            else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
+            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position actuelle : **{current_pos.upper()}**"
         )
-        view = PersonalControlView(is_active)
+        view = PersonalControlView(is_active, username)
         try:
             await interaction.followup.send(content=status_text, view=view, ephemeral=True)
         except Exception as e:
@@ -259,15 +309,18 @@ def get_next_meme():
         if user not in active_users:
             return jsonify({"url": None, "status": "inactive"})
 
+        position = user_positions.get(user, "center")
+
         if current_active_item:
             res_data = {
                 "name": current_active_item["name"],
                 "avatar": current_active_item["avatar"],
                 "content": current_active_item["content"],
-                "url": current_active_item["url"]
+                "url": current_active_item["url"],
+                "position": position
             }
         else:
-            res_data = {"url": None}
+            res_data = {"url": None, "position": position}
 
     return jsonify(res_data)
 
@@ -302,9 +355,6 @@ if __name__ == "__main__":
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
-    
-    TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
-    bot.run(TOKEN)
     
     TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
     bot.run(TOKEN)

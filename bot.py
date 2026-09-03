@@ -22,10 +22,10 @@ class StopView(discord.ui.View):
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         global current_active_item, media_queue, active_message
         
-        # On supprime complètement le message de contrôle ou on enlève les boutons (view=None fait disparaître le bouton)
+        # Supprime complètement le message de notification du bot sur Discord
         try:
             if active_message:
-                await active_message.edit(content="⏹️ **Média arrêté et skippé.**", view=None)
+                await active_message.delete()
         except Exception:
             pass
             
@@ -79,11 +79,9 @@ async def on_message(message):
 def get_next_meme():
     global current_active_item, media_queue
     
-    # Si aucun média n'est en cours et qu'il y en a dans la file, on prend le suivant
     if current_active_item is None and media_queue:
         current_active_item = media_queue.pop(0)
         
-        # Envoi du bouton sur Discord pour ce nouveau média
         future = asyncio.run_coroutine_threadsafe(send_stop_button_to_discord(current_active_item), bot.loop)
         try:
             future.result(timeout=5)

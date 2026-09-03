@@ -27,10 +27,9 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v7")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v8")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        
         username = interaction.user.display_name
         
         if username in active_users:
@@ -41,13 +40,11 @@ class PersonalControlView(discord.ui.View):
             self.is_active = True
         
         self.update_button_style()
-        
         status_text = (
             "🟢 **Ton Live Chat est ACTIF !** Les médias s'affichent sur ton PC." 
             if self.is_active 
             else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
         )
-        
         try:
             await interaction.edit_original_response(content=status_text, view=self)
         except Exception:
@@ -57,21 +54,17 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v7")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v8")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        
         username = interaction.user.display_name
         is_active = username in active_users
-        
         status_text = (
             "🟢 **Ton Live Chat est ACTIF !** Les médias s'affichent sur ton PC." 
             if is_active 
             else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
         )
-        
         view = PersonalControlView(is_active)
-        
         try:
             await interaction.followup.send(content=status_text, view=view, ephemeral=True)
         except Exception as e:
@@ -130,14 +123,17 @@ async def on_message(message):
                 "control_message": None
             }
             
-            is_first_ever = (current_active_item is None and len(media_queue) == 0)
-            media_queue.append(item)
-            
-            bot.loop.create_task(send_initial_button(item, is_active=is_first_ever))
+            # Si rien n'est en cours, cet item devient le courant direct
+            if current_active_item is None:
+                current_active_item = item
+                bot.loop.create_task(send_control_message(item, is_active=True))
+            else:
+                media_queue.append(item)
+                bot.loop.create_task(send_control_message(item, is_active=False))
 
     await bot.process_commands(message)
 
-async def send_initial_button(item, is_active):
+async def send_control_message(item, is_active):
     try:
         class ItemStopView(discord.ui.View):
             def __init__(self, item_ref, active):
@@ -145,19 +141,23 @@ async def send_initial_button(item, is_active):
                 self.item_ref = item_ref
                 self.stop_button.disabled = not active
 
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic")
+            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v2")
             async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await interaction.response.defer()
                 global current_active_item, media_queue
+                
+                # Supprime le message de contrôle actuel
                 try:
                     if self.item_ref.get("control_message"):
                         await self.item_ref["control_message"].delete()
                 except Exception:
                     pass
+                
+                # Passe au suivant dans la file s'il y en a un
                 if current_active_item == self.item_ref:
                     if media_queue:
                         current_active_item = media_queue.pop(0)
-                        asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
+                        asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
                     else:
                         current_active_item = None
 
@@ -166,15 +166,16 @@ async def send_initial_button(item, is_active):
         msg = await item["message_obj"].reply(status_text, view=view)
         item["control_message"] = msg
     except Exception as e:
-        print(f"Erreur bouton initial : {e}")
+        print(f"Erreur message de contrôle : {e}")
 
-async def activate_item_button(item):
+async def activate_next_item_message(item):
     try:
         class ItemStopView(discord.ui.View):
-            def __init__(self, item_ref, active):
+            def __init__(self, item_ref):
                 super().__init__(timeout=None)
                 self.item_ref = item_ref
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_active")
+
+            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_active_v2")
             async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await interaction.response.defer()
                 global current_active_item, media_queue
@@ -183,31 +184,27 @@ async def activate_item_button(item):
                         await self.item_ref["control_message"].delete()
                 except Exception:
                     pass
+                
                 if current_active_item == self.item_ref:
                     if media_queue:
                         current_active_item = media_queue.pop(0)
-                        asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
+                        asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
                     else:
                         current_active_item = None
 
         if item.get("control_message"):
-            view = ItemStopView(item, True)
+            view = ItemStopView(item)
             await item["control_message"].edit(content="🎬 **Média en cours de diffusion...**", view=view)
     except Exception as e:
-        print(f"Erreur activation : {e}")
+        print(f"Erreur activation prochain message : {e}")
 
 @app.route('/get_next_meme', methods=['GET'])
 def get_next_meme():
     global current_active_item, media_queue
-    
     user = request.args.get("user", "").strip()
     
     if not user or user not in active_users:
         return jsonify({"url": None})
-
-    if current_active_item is None and media_queue:
-        current_active_item = media_queue.pop(0)
-        asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
 
     if current_active_item:
         if current_active_item["name"].lower() == user.lower():
@@ -234,7 +231,7 @@ def pop_meme():
         
         if media_queue:
             current_active_item = media_queue.pop(0)
-            asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
+            asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
         else:
             current_active_item = None
             

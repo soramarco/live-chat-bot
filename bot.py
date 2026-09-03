@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import time
 from threading import Thread
 import discord
 from discord.ext import commands
@@ -12,6 +13,10 @@ media_queue = []
 current_active_item = None
 active_users = set()
 queue_lock = threading.Lock()
+
+# Cache global pour éviter de surcharger le serveur si 6-7 personnes demandent en même temps
+cached_response = {"data": {"url": None}, "timestamp": 0}
+CACHE_DURATION = 1.5  # Durée du cache en secondes pour absorber les requêtes simultanées
 
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active):
@@ -29,7 +34,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v23")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v24")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -61,7 +66,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v23")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v24")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -113,13 +118,12 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    global current_active_item, media_queue
+    global current_active_item, media_queue, cached_response
     
     if message.author.bot:
         return
         
     if message.channel.name == LIVE_CHANNEL_NAME:
-        # 1. Gestion des médias et médias envoyés
         media_url = ""
         if message.attachments:
             media_url = message.attachments[0].url
@@ -141,7 +145,8 @@ async def on_message(message):
             }
             
             with queue_lock:
-                if len(media_queue) > 20:
+                # Sécurité stricte anti-saturation de la file d'attente
+                if len(media_queue) > 15:
                     media_queue.pop(0)
 
                 if current_active_item is None:
@@ -150,10 +155,13 @@ async def on_message(message):
                 else:
                     media_queue.append(item)
                     is_first = False
+                
+                # Invalide le cache dès qu'un nouveau média arrive pour une mise à jour rapide
+                cached_response["timestamp"] = 0
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # 2. Déplace et republie automatiquement le panneau de contrôle tout en bas à chaque message
+        # Republie le panneau tout en bas
         try:
             async for old_msg in message.channel.history(limit=30):
                 if old_msg.author == bot.user and "Panneau de contrôle du Live Chat" in old_msg.content:
@@ -177,14 +185,14 @@ class ItemStopView(discord.ui.View):
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v17")
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v18")
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer()
         except Exception:
             pass
             
-        global current_active_item, media_queue
+        global current_active_item, media_queue, cached_response
         with queue_lock:
             if current_active_item == self.item_ref:
                 try:
@@ -198,6 +206,7 @@ class ItemStopView(discord.ui.View):
                     asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
                 else:
                     current_active_item = None
+                cached_response["timestamp"] = 0
 
 async def send_control_message(item, is_active):
     try:
@@ -218,29 +227,40 @@ async def activate_next_item_message(item):
 
 @app.route('/get_next_meme', methods=['GET'])
 def get_next_meme():
-    global current_active_item, media_queue
+    global current_active_item, media_queue, cached_response
     user = request.args.get("user", "").strip()
     
     if not user or user not in active_users:
         return jsonify({"url": None})
 
-    with queue_lock:
-        if current_active_item:
-            if current_active_item["name"].lower() == user.lower():
-                return jsonify({"url": None})
-                
-            return jsonify({
-                "name": current_active_item["name"],
-                "avatar": current_active_item["avatar"],
-                "content": current_active_item["content"],
-                "url": current_active_item["url"]
-            })
+    current_time = time.time()
     
-    return jsonify({"url": None})
+    # Utilisation du cache pour absorber les vagues de requêtes simultanées de 6-7+ utilisateurs
+    with queue_lock:
+        if current_time - cached_response["timestamp"] < CACHE_DURATION:
+            res_data = cached_response["data"]
+        else:
+            if current_active_item:
+                if current_active_item["name"].lower() == user.lower():
+                    res_data = {"url": None}
+                else:
+                    res_data = {
+                        "name": current_active_item["name"],
+                        "avatar": current_active_item["avatar"],
+                        "content": current_active_item["content"],
+                        "url": current_active_item["url"]
+                    }
+            else:
+                res_data = {"url": None}
+            
+            cached_response["data"] = res_data
+            cached_response["timestamp"] = current_time
+
+    return jsonify(res_data)
 
 @app.route('/pop_meme', methods=['POST'])
 def pop_meme():
-    global current_active_item, media_queue
+    global current_active_item, media_queue, cached_response
     with queue_lock:
         if current_active_item:
             if current_active_item.get("control_message"):
@@ -251,6 +271,8 @@ def pop_meme():
                 asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
             else:
                 current_active_item = None
+            cached_response["timestamp"] = 0
+            
     return jsonify({"status": "success"})
 
 async def safe_delete_msg(msg):

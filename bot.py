@@ -29,7 +29,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v15")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v16")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         username = interaction.user.display_name
@@ -56,7 +56,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v15")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v16")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         username = interaction.user.display_name
@@ -135,32 +135,32 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+class ItemStopView(discord.ui.View):
+    def __init__(self, item_ref, active):
+        super().__init__(timeout=None)
+        self.item_ref = item_ref
+        self.stop_button.disabled = not active
+
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v10")
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        global current_active_item, media_queue
+        with queue_lock:
+            try:
+                if self.item_ref.get("control_message"):
+                    await self.item_ref["control_message"].delete()
+            except Exception:
+                pass
+            
+            if current_active_item == self.item_ref:
+                if media_queue:
+                    current_active_item = media_queue.pop(0)
+                    asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+                else:
+                    current_active_item = None
+
 async def send_control_message(item, is_active):
     try:
-        class ItemStopView(discord.ui.View):
-            def __init__(self, item_ref, active):
-                super().__init__(timeout=None)
-                self.item_ref = item_ref
-                self.stop_button.disabled = not active
-
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v9")
-            async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                await interaction.response.defer()
-                global current_active_item, media_queue
-                with queue_lock:
-                    try:
-                        if self.item_ref.get("control_message"):
-                            await self.item_ref["control_message"].delete()
-                    except Exception:
-                        pass
-                    
-                    if current_active_item == self.item_ref:
-                        if media_queue:
-                            current_active_item = media_queue.pop(0)
-                            asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
-                        else:
-                            current_active_item = None
-
         view = ItemStopView(item, is_active)
         status_text = "🎬 **Média en cours de diffusion...**" if is_active else "⏳ **En attente dans la file...**"
         msg = await item["message_obj"].reply(status_text, view=view)
@@ -170,31 +170,8 @@ async def send_control_message(item, is_active):
 
 async def activate_next_item_message(item):
     try:
-        class ItemStopView(discord.ui.View):
-            def __init__(self, item_ref):
-                super().__init__(timeout=None)
-                self.item_ref = item_ref
-
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_active_v9")
-            async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-                await interaction.response.defer()
-                global current_active_item, media_queue
-                with queue_lock:
-                    try:
-                        if self.item_ref.get("control_message"):
-                            await self.item_ref["control_message"].delete()
-                    except Exception:
-                        pass
-                    
-                    if current_active_item == self.item_ref:
-                        if media_queue:
-                            current_active_item = media_queue.pop(0)
-                            asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
-                        else:
-                            current_active_item = None
-
         if item.get("control_message"):
-            view = ItemStopView(item)
+            view = ItemStopView(item, active=True)
             await item["control_message"].edit(content="🎬 **Média en cours de diffusion...**", view=view)
     except Exception as e:
         print(f"Erreur activation prochain message : {e}")

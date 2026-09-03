@@ -202,7 +202,7 @@ async def on_message(message):
 
 class ItemStopView(discord.ui.View):
     def __init__(self, item_ref, active):
-        super().__init__(timeout=86400)  # Corrigé : timeout de 24h au lieu de None pour éviter le blocage des clics
+        super().__init__(timeout=86400)
         self.item_ref = item_ref
         self.stop_button.disabled = not active
 

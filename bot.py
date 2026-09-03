@@ -10,11 +10,11 @@ app = Flask(__name__)
 media_queue = []
 current_active_item = None
 active_users = set()
+user_control_messages = {}
 
-# Panneau de contrôle personnel (privé et temporaire)
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.is_active = is_active
         self.update_button_style()
 
@@ -28,7 +28,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_btn")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         username = interaction.user.display_name
         
@@ -48,14 +48,14 @@ class PersonalControlView(discord.ui.View):
         )
         await interaction.response.edit_message(content=status_text, view=self)
 
-# Bouton principal permanent dans le salon
 class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_v2")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_v4")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         username = interaction.user.display_name
+        user_id = interaction.user.id
         is_active = username in active_users
         
         status_text = (
@@ -65,7 +65,23 @@ class MainPanelView(discord.ui.View):
         )
         
         view = PersonalControlView(is_active)
-        await interaction.response.send_message(content=status_text, view=view, ephemeral=True)
+        
+        try:
+            dm_channel = await interaction.user.create_dm()
+            if user_id in user_control_messages:
+                try:
+                    msg = user_control_messages[user_id]
+                    await msg.edit(content=status_text, view=view)
+                except Exception:
+                    msg = await dm_channel.send(content=status_text, view=view)
+                    user_control_messages[user_id] = msg
+            else:
+                msg = await dm_channel.send(content=status_text, view=view)
+                user_control_messages[user_id] = msg
+            
+            await interaction.response.send_message("📩 Ton panneau de contrôle unique t'a été envoyé en **Message Privé (DM)** pour éviter les doublons !", ephemeral=True, delete_after=5)
+        except Exception:
+            await interaction.response.send_message(content=status_text, view=view, ephemeral=True)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -84,7 +100,6 @@ async def on_ready():
                 existing_message = None
                 async for message in channel.history(limit=20):
                     if message.author == bot.user and message.components:
-                        # On récupère le panneau existant pour le mettre à jour au lieu d'en recréer un
                         existing_message = message
                         break
                 
@@ -97,7 +112,6 @@ async def on_ready():
                     except:
                         pass
                 else:
-                    # S'il n'y en a vraiment aucun, on envoie le message unique propre
                     await channel.send(content_text, view=view)
 
 @bot.event

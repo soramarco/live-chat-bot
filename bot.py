@@ -19,7 +19,7 @@ class StopView(discord.ui.View):
 
     @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        global current_active_item
+        global current_active_item, media_queue
         
         try:
             if self.item_ref.get("control_message"):
@@ -28,7 +28,12 @@ class StopView(discord.ui.View):
             pass
             
         if current_active_item == self.item_ref:
-            current_active_item = None
+            # On passe directement au suivant s'il y en a un dans la file !
+            if media_queue:
+                current_active_item = media_queue.pop(0)
+                asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
+            else:
+                current_active_item = None
             
         await interaction.response.defer()
 
@@ -90,12 +95,12 @@ async def send_initial_button(item, is_active):
 def get_next_meme():
     global current_active_item, media_queue
     
-    # 1. Si l'overlay demande le prochain et qu'aucun média n'est actif, on prend le premier de la file
+    # Si rien n'est en cours mais qu'il y a du monde dans la file
     if current_active_item is None and media_queue:
         current_active_item = media_queue.pop(0)
         asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
 
-    # 2. Si on a un média actif, on le renvoie
+    # On renvoie le média actif actuel (qu'il vienne d'être pris ou qu'il soit déjà en cours)
     if current_active_item:
         return jsonify({
             "name": current_active_item["name"],
@@ -104,8 +109,6 @@ def get_next_meme():
             "url": current_active_item["url"]
         })
     
-    # 3. Si current_active_item est None (parce qu'on a cliqué sur Stop ou que c'est fini), 
-    # on renvoie explicitement un URL à None pour que l'overlay coupe l'affichage et passe au suivant.
     return jsonify({"url": None})
 
 async def activate_item_button(item):

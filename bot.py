@@ -1,5 +1,6 @@
 import os
 import asyncio
+import threading
 from threading import Thread
 import discord
 from discord.ext import commands
@@ -10,6 +11,7 @@ app = Flask(__name__)
 media_queue = []
 current_active_item = None
 active_users = set()
+queue_lock = threading.Lock()
 
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active):
@@ -27,7 +29,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v9")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v10")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         username = interaction.user.display_name
@@ -54,7 +56,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v9")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v10")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         username = interaction.user.display_name
@@ -123,12 +125,13 @@ async def on_message(message):
                 "control_message": None
             }
             
-            if current_active_item is None:
-                current_active_item = item
-                bot.loop.create_task(send_control_message(item, is_active=True))
-            else:
-                media_queue.append(item)
-                bot.loop.create_task(send_control_message(item, is_active=False))
+            with queue_lock:
+                if current_active_item is None:
+                    current_active_item = item
+                    bot.loop.create_task(send_control_message(item, is_active=True))
+                else:
+                    media_queue.append(item)
+                    bot.loop.create_task(send_control_message(item, is_active=False))
 
     await bot.process_commands(message)
 
@@ -140,23 +143,23 @@ async def send_control_message(item, is_active):
                 self.item_ref = item_ref
                 self.stop_button.disabled = not active
 
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v3")
+            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_v4")
             async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await interaction.response.defer()
                 global current_active_item, media_queue
-                
-                try:
-                    if self.item_ref.get("control_message"):
-                        await self.item_ref["control_message"].delete()
-                except Exception:
-                    pass
-                
-                if current_active_item == self.item_ref:
-                    if media_queue:
-                        current_active_item = media_queue.pop(0)
-                        asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
-                    else:
-                        current_active_item = None
+                with queue_lock:
+                    try:
+                        if self.item_ref.get("control_message"):
+                            await self.item_ref["control_message"].delete()
+                    except Exception:
+                        pass
+                    
+                    if current_active_item == self.item_ref:
+                        if media_queue:
+                            current_active_item = media_queue.pop(0)
+                            asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+                        else:
+                            current_active_item = None
 
         view = ItemStopView(item, is_active)
         status_text = "🎬 **Média en cours de diffusion...**" if is_active else "⏳ **En attente dans la file...**"
@@ -172,22 +175,23 @@ async def activate_next_item_message(item):
                 super().__init__(timeout=None)
                 self.item_ref = item_ref
 
-            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_active_v3")
+            @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="stop_btn_dynamic_active_v4")
             async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await interaction.response.defer()
                 global current_active_item, media_queue
-                try:
-                    if self.item_ref.get("control_message"):
-                        await self.item_ref["control_message"].delete()
-                except Exception:
-                    pass
-                
-                if current_active_item == self.item_ref:
-                    if media_queue:
-                        current_active_item = media_queue.pop(0)
-                        asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
-                    else:
-                        current_active_item = None
+                with queue_lock:
+                    try:
+                        if self.item_ref.get("control_message"):
+                            await self.item_ref["control_message"].delete()
+                    except Exception:
+                        pass
+                    
+                    if current_active_item == self.item_ref:
+                        if media_queue:
+                            current_active_item = media_queue.pop(0)
+                            asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+                        else:
+                            current_active_item = None
 
         if item.get("control_message"):
             view = ItemStopView(item)
@@ -203,35 +207,37 @@ def get_next_meme():
     if not user or user not in active_users:
         return jsonify({"url": None})
 
-    if current_active_item:
-        if current_active_item["name"].lower() == user.lower():
-            return jsonify({"url": None})
-            
-        return jsonify({
-            "name": current_active_item["name"],
-            "avatar": current_active_item["avatar"],
-            "content": current_active_item["content"],
-            "url": current_active_item["url"]
-        })
+    with queue_lock:
+        if current_active_item:
+            if current_active_item["name"].lower() == user.lower():
+                return jsonify({"url": None})
+                
+            return jsonify({
+                "name": current_active_item["name"],
+                "avatar": current_active_item["avatar"],
+                "content": current_active_item["content"],
+                "url": current_active_item["url"]
+            })
     
     return jsonify({"url": None})
 
 @app.route('/pop_meme', methods=['POST'])
 def pop_meme():
     global current_active_item, media_queue
-    if current_active_item:
-        try:
-            if current_active_item.get("control_message"):
-                asyncio.run_coroutine_threadsafe(current_active_item["control_message"].delete(), bot.loop)
-        except:
-            pass
-        
-        if media_queue:
-            current_active_item = media_queue.pop(0)
-            asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
-        else:
-            current_active_item = None
+    with queue_lock:
+        if current_active_item:
+            try:
+                if current_active_item.get("control_message"):
+                    asyncio.run_coroutine_threadsafe(current_active_item["control_message"].delete(), bot.loop)
+            except:
+                pass
             
+            if media_queue:
+                current_active_item = media_queue.pop(0)
+                asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+            else:
+                current_active_item = None
+                
     return jsonify({"status": "success"})
 
 def run_flask():

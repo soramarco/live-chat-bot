@@ -223,8 +223,24 @@ def get_next_meme():
 
 @app.route('/pop_meme', methods=['POST'])
 def pop_meme():
-    # Route neutralisée pour éviter tout double dépilement conflictuel
-    return jsonify({"status": "ignored"})
+    global current_active_item, media_queue
+    with queue_lock:
+        if current_active_item:
+            if current_active_item.get("control_message"):
+                asyncio.run_coroutine_threadsafe(safe_delete_msg(current_active_item["control_message"]), bot.loop)
+            
+            if media_queue:
+                current_active_item = media_queue.pop(0)
+                asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+            else:
+                current_active_item = None
+    return jsonify({"status": "success"})
+
+async def safe_delete_msg(msg):
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))

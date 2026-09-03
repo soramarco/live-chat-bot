@@ -77,17 +77,28 @@ LIVE_CHANNEL_NAME = "live-chat"
 async def on_ready():
     print(f"Bot connecté en tant que {bot.user}")
     bot.add_view(MainPanelView())
+    
     for guild in bot.guilds:
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
-                async for message in channel.history(limit=10):
-                    if message.author == bot.user:
-                        try:
-                            await message.delete()
-                        except:
-                            pass
+                existing_message = None
+                async for message in channel.history(limit=20):
+                    if message.author == bot.user and message.components:
+                        # On récupère le panneau existant pour le mettre à jour au lieu d'en recréer un
+                        existing_message = message
+                        break
+                
                 view = MainPanelView()
-                await channel.send("🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :", view=view)
+                content_text = "🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :"
+                
+                if existing_message:
+                    try:
+                        await existing_message.edit(content=content_text, view=view)
+                    except:
+                        pass
+                else:
+                    # S'il n'y en a vraiment aucun, on envoie le message unique propre
+                    await channel.send(content_text, view=view)
 
 @bot.event
 async def on_message(message):

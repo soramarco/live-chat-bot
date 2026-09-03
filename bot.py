@@ -258,8 +258,8 @@ def get_next_meme():
         if user not in active_users:
             return jsonify({"url": None, "status": "inactive"})
 
-        if current_active_item and current_active_item["name"].lower() == user.lower():
-            return jsonify({"url": None})
+        # La condition qui bloquait l'auteur a été supprimée : 
+        # tu reçois désormais ton propre média sur ton overlay.
 
         if current_active_item:
             res_data = {

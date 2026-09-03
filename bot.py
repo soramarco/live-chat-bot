@@ -66,7 +66,8 @@ class PersonalControlView(discord.ui.View):
     @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v28", row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.defer(ephemeral=True)
+            # Message personnalisé pour prévenir du réveil du serveur si Render sort de sa veille
+            await interaction.response.send_message("⏳ Le serveur Render sort de sa sieste, un instant...", ephemeral=True)
         except Exception:
             pass
             
@@ -95,7 +96,7 @@ class PersonalControlView(discord.ui.View):
     @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.send_message("⏳ Le serveur Render sort de sa sieste, un instant...", ephemeral=True)
         except Exception:
             pass
         with queue_lock:
@@ -106,7 +107,7 @@ class PersonalControlView(discord.ui.View):
     @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1)
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.send_message("⏳ Le serveur Render sort de sa sieste, un instant...", ephemeral=True)
         except Exception:
             pass
         with queue_lock:
@@ -117,7 +118,7 @@ class PersonalControlView(discord.ui.View):
     @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.send_message("⏳ Le serveur Render sort de sa sieste, un instant...", ephemeral=True)
         except Exception:
             pass
         with queue_lock:
@@ -143,7 +144,7 @@ class MainPanelView(discord.ui.View):
     @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v28")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.send_message("⏳ Le serveur Render sort de sa sieste, un instant...", ephemeral=True)
         except Exception:
             pass
             
@@ -158,7 +159,7 @@ class MainPanelView(discord.ui.View):
         )
         view = PersonalControlView(is_active, username)
         try:
-            await interaction.followup.send(content=status_text, view=view, ephemeral=True)
+            await interaction.edit_original_response(content=status_text, view=view)
         except Exception as e:
             print(f"Erreur d'affichage du panneau : {e}")
 

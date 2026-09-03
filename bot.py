@@ -27,8 +27,11 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_final")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_v6")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 1. On prévient immédiatement Discord qu'on traite la requête pour éviter le timeout
+        await interaction.response.defer()
+        
         username = interaction.user.display_name
         
         if username in active_users:
@@ -45,27 +48,37 @@ class PersonalControlView(discord.ui.View):
             if self.is_active 
             else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
         )
-        # Met à jour directement le message éphémère existant sans en créer un nouveau
-        await interaction.response.edit_message(content=status_text, view=self)
+        
+        try:
+            await interaction.edit_original_response(content=status_text, view=self)
+        except Exception:
+            pass
 
 class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_final")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_v6")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Réponse immédiate pour valider le clic sans erreur de délai
+        await interaction.response.defer(ephemeral=True)
+        
         username = interaction.user.display_name
         is_active = username in active_users
         
         status_text = (
             "🟢 **Ton Live Chat est ACTIF !** Les médias s'affichent sur ton PC." 
-            if self.is_active 
+            if is_active 
             else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
         )
         
         view = PersonalControlView(is_active)
-        # Envoie un message purement éphémère dans le salon (visible uniquement par toi, disparaît si tu cliques ailleurs ou actualises, sans jamais spammer)
-        await interaction.response.send_message(content=status_text, view=view, ephemeral=True)
+        
+        # Envoie le message unique éphémère de gestion directement visible par l'utilisateur
+        try:
+            await interaction.followup.send(content=status_text, view=view, ephemeral=True)
+        except Exception as e:
+            print(f"Erreur d'affichage du panneau : {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True

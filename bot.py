@@ -17,7 +17,6 @@ queue_lock = threading.Lock()
 main_panel_message = None
 
 cached_response = {"data": {"url": None}, "timestamp": 0}
-CACHE_DURATION = 1.5
 
 def get_main_panel_content():
     with queue_lock:
@@ -259,7 +258,6 @@ def get_next_meme():
         if user not in active_users:
             return jsonify({"url": None, "status": "inactive"})
 
-        # Si l'utilisateur est celui qui a posté la vidéo, on ne lui renvoie pas sa propre vidéo pour éviter qu'elle boucle
         if current_active_item and current_active_item["name"].lower() == user.lower():
             return jsonify({"url": None})
 

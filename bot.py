@@ -9,12 +9,12 @@ app = Flask(__name__)
 
 media_queue = []
 current_active_item = None
-active_users = set()  # Stocke les pseudos des utilisateurs qui ont activé leur overlay
+active_users = set()
 
-# Panneau de contrôle personnel (privé pour chaque utilisateur)
+# Panneau de contrôle personnel (privé et temporaire pour éviter les blocages)
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active):
-        super().__init__(timeout=None)
+        super().__init__(timeout=180)  # Timeout normal pour un message éphémère
         self.is_active = is_active
         self.update_button_style()
 
@@ -28,7 +28,7 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-    @discord.ui.button(custom_id="personal_toggle_btn")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         username = interaction.user.display_name
         
@@ -53,7 +53,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_v2")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         username = interaction.user.display_name
         is_active = username in active_users
@@ -75,15 +75,18 @@ LIVE_CHANNEL_NAME = "live-chat"
 
 @bot.event
 async def on_ready():
-    print(f"Bot connecté en tantf que {bot.user}")
+    print(f"Bot connecté en tant que {bot.user}")
     bot.add_view(MainPanelView())
     for guild in bot.guilds:
         for channel in guild.text_channels:
             if channel.name == LIVE_CHANNEL_NAME:
-                # Vérifie si le message de base existe déjà pour éviter de le spammer à chaque redémarrage
-                async for message in channel.history(limit=50):
-                    if message.author == bot.user and "Panneau de contrôle" in message.content:
-                        return
+                # Nettoie les anciens messages du bot pour repartir sur du propre
+                async for message in channel.history(limit=10):
+                    if message.author == bot.user:
+                        try:
+                            await message.delete()
+                        except:
+                            pass
                 view = MainPanelView()
                 await channel.send("🎛️ **Panneau de contrôle du Live Chat**\nClique sur le bouton ci-dessous pour gérer ton affichage personnel :", view=view)
 
@@ -215,9 +218,6 @@ if __name__ == "__main__":
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
-    
-    TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
-    bot.run(TOKEN)
     
     TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
     bot.run(TOKEN)

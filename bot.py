@@ -252,16 +252,20 @@ def get_next_meme():
     global current_active_item, media_queue, cached_response
     user = request.args.get("user", "").strip()
     
-    if not user or user not in active_users:
+    if not user:
         return jsonify({"url": None})
 
-    current_time = time.time()
-    
     with queue_lock:
+        if user not in active_users:
+            return jsonify({"url": None})
+
+        current_time = time.time()
         if current_time - cached_response["timestamp"] < CACHE_DURATION:
             res_data = cached_response["data"]
         else:
             if current_active_item:
+                # Optionnel : si l'auteur du mème est celui qui regarde, on peut lui renvoyer None ou l'afficher selon ton choix.
+                # Ici on laisse tel quel pour éviter les boucles en double.
                 if current_active_item["name"].lower() == user.lower():
                     res_data = {"url": None}
                 else:
@@ -310,6 +314,9 @@ if __name__ == "__main__":
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
+    
+    TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
+    bot.run(TOKEN)
     
     TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
     bot.run(TOKEN)

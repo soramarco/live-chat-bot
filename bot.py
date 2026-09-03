@@ -17,27 +17,25 @@ class StopView(discord.ui.View):
         self.bot_instance = bot_instance
         self.item_ref = item_ref
         
-        # On crée le bouton Stop
-        self.stop_btn = discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, disabled=not is_active)
-        # Ajout dynamique du callback
-        self.stop_btn.callback = self.stop_button_callback
-        self.add_item(self.stop_btn)
+        # On désactive le bouton s'il n'est pas le média en cours
+        self.stop_button.disabled = not is_active
 
-    async def stop_button_callback(self, interaction: discord.Interaction):
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         global current_active_item
         
-        # Supprime complètement le message du bouton sur Discord
+        # Supprime complètement le message de contrôle du bot sur Discord
         try:
             if self.item_ref.get("control_message"):
                 await self.item_ref["control_message"].delete()
         except Exception:
             pass
             
-        # Libère le média pour passer au suivant
+        # Libère le média actuel pour passer au suivant
         if current_active_item == self.item_ref:
             current_active_item = None
             
-        # Supprime le message de confirmation pour garder le chat propre
+        # Valide l'interaction discrètement sans message polluant
         await interaction.response.defer()
 
 intents = discord.Intents.default()
@@ -78,17 +76,17 @@ async def on_message(message):
                 "control_message": None
             }
             
-            # On envoie immédiatement le bouton sous le message, mais grisé (désactivé) si un média tourne déjà
+            # Détermine si c'est le tout premier média (actif direct) ou s'il rejoint la file (grisé)
             is_first_ever = (current_active_item is None and len(media_queue) == 0)
             
+            media_queue.append(item)
+            print(f"[BOT] Média ajouté à la file : {item['name']} (Total en attente: {len(media_queue)})")
+
             future = asyncio.run_coroutine_threadsafe(send_initial_button(item, is_active=is_first_ever), bot.loop)
             try:
                 future.result(timeout=5)
             except Exception as e:
                 print(f"Erreur envoi bouton initial: {e}")
-
-            media_queue.append(item)
-            print(f"[BOT] Média ajouté à la file : {item['name']} (Total en attente: {len(media_queue)})")
 
     await bot.process_commands(message)
 
@@ -105,11 +103,11 @@ async def send_initial_button(item, is_active):
 def get_next_meme():
     global current_active_item, media_queue
     
-    # Si rien n'est en cours mais qu'il y a du monde dans la file
+    # Si rien n'est en cours mais qu'il y a des éléments dans la file
     if current_active_item is None and media_queue:
         current_active_item = media_queue.pop(0)
         
-        # On active son bouton sur Discord via une coroutine
+        # On active son bouton sur Discord
         asyncio.run_coroutine_threadsafe(activate_item_button(current_active_item), bot.loop)
 
     if current_active_item:

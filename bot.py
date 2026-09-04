@@ -1,7 +1,6 @@
 import os
 import asyncio
 import threading
-import time
 from threading import Thread
 import discord
 from discord.ext import commands
@@ -67,7 +66,7 @@ class PersonalControlView(discord.ui.View):
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
         self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v28", row=0)
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v29", row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -144,7 +143,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v28")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v29")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -175,7 +174,7 @@ LIVE_CHANNEL_NAME = "live-chat"
 @bot.event
 async def on_ready():
     global main_panel_message
-    print(f"Bot connecté en tant que {bot.user}")
+    print(f"[DISCORD] Bot connecté en tant que {bot.user}")
     bot.add_view(MainPanelView())
     
     for guild in bot.guilds:
@@ -353,12 +352,19 @@ async def safe_delete_msg(msg):
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    print(f"[FLASK] Démarrage du serveur web sur le port {port}...")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
+    # Lancement du serveur web Flask en arrière-plan
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
     
-    TOKEN = os.environ.get("DISCORD_TOKEN", "TON_TOKEN_BOT_ICI")
-    bot.run(TOKEN)
+    # Récupération et lancement du Bot Discord
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if not TOKEN:
+        print("[ERREUR] Le token Discord (DISCORD_TOKEN) est introuvable dans les variables d'environnement !")
+    else:
+        print("[DISCORD] Tentative de connexion à l'API Discord...")
+        bot.run(TOKEN)

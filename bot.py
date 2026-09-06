@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import json
 from threading import Thread
 import discord
 from discord.ext import commands
@@ -8,21 +9,51 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Bot is alive!", 200
+# Fichier de sauvegarde pour la persistance sur Render
+STORAGE_FILE = "bot_storage.json"
 
-media_queue = []
+# Structures de données pour une file d'attente globale partagée
+global_queue = []
 current_active_item = None
 active_users = set()
 user_positions = {}
-queue_lock = threading.Lock()
+data_lock = threading.Lock()
 
 main_panel_message = None
 cached_response = {"data": {"url": None}, "timestamp": 0}
 
+def load_data():
+    """Charge les positions des utilisateurs depuis le fichier JSON"""
+    global user_positions
+    if os.path.exists(STORAGE_FILE):
+        try:
+            with open(STORAGE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                user_positions = data.get("user_positions", {})
+                print(f"[DATA] Données chargées avec succès : {len(user_positions)} utilisateur(s) enregistré(s).")
+        except Exception as e:
+            print(f"[ERREUR] Impossible de charger le fichier de stockage : {e}")
+
+def save_data():
+    """Sauvegarde les positions des utilisateurs dans le fichier JSON"""
+    try:
+        data = {
+            "user_positions": user_positions
+        }
+        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"[ERREUR] Impossible de sauvegarder le fichier de stockage : {e}")
+
+# Charger les données au démarrage du script
+load_data()
+
+@app.route('/')
+def home():
+    return "Bot is alive!", 200
+
 def get_main_panel_content():
-    with queue_lock:
+    with data_lock:
         count = len(active_users)
         if count == 0:
             users_str = "_Personne_"
@@ -66,14 +97,14 @@ class PersonalControlView(discord.ui.View):
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
         self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v29", row=0)
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v30", row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
             
-        with queue_lock:
+        with data_lock:
             if self.username in active_users:
                 active_users.remove(self.username)
                 self.is_active = False
@@ -101,8 +132,9 @@ class PersonalControlView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        with queue_lock:
+        with data_lock:
             user_positions[self.username] = "left"
+            save_data() # Sauvegarde automatique
         self.update_button_styles()
         await self.update_response(interaction)
 
@@ -112,8 +144,9 @@ class PersonalControlView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        with queue_lock:
+        with data_lock:
             user_positions[self.username] = "center"
+            save_data() # Sauvegarde automatique
         self.update_button_styles()
         await self.update_response(interaction)
 
@@ -123,8 +156,9 @@ class PersonalControlView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except Exception:
             pass
-        with queue_lock:
+        with data_lock:
             user_positions[self.username] = "right"
+            save_data() # Sauvegarde automatique
         self.update_button_styles()
         await self.update_response(interaction)
 
@@ -143,7 +177,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v29")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v30")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -151,8 +185,9 @@ class MainPanelView(discord.ui.View):
             pass
             
         username = interaction.user.display_name
-        is_active = username in active_users
-        current_pos = user_positions.get(username, "center")
+        with data_lock:
+            is_active = username in active_users
+            current_pos = user_positions.get(username, "center")
         
         status_text = (
             f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos.upper()}**" 
@@ -197,7 +232,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    global current_active_item, media_queue, cached_response, main_panel_message
+    global current_active_item, global_queue, cached_response, main_panel_message
     
     if message.author.bot:
         return
@@ -223,15 +258,15 @@ async def on_message(message):
                 "control_message": None
             }
             
-            with queue_lock:
-                if len(media_queue) > 15:
-                    media_queue.pop(0)
+            with data_lock:
+                if len(global_queue) > 15:
+                    global_queue.pop(0)
 
                 if current_active_item is None:
                     current_active_item = item
                     is_first = True
                 else:
-                    media_queue.append(item)
+                    global_queue.append(item)
                     is_first = False
                 
                 cached_response["timestamp"] = 0
@@ -267,8 +302,8 @@ class ItemStopView(discord.ui.View):
         except Exception:
             pass
             
-        global current_active_item, media_queue, cached_response
-        with queue_lock:
+        global current_active_item, global_queue, cached_response
+        with data_lock:
             if current_active_item == self.item_ref:
                 try:
                     if self.item_ref.get("control_message"):
@@ -276,8 +311,8 @@ class ItemStopView(discord.ui.View):
                 except Exception:
                     pass
                 
-                if media_queue:
-                    current_active_item = media_queue.pop(0)
+                if global_queue:
+                    current_active_item = global_queue.pop(0)
                     asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
                 else:
                     current_active_item = None
@@ -302,13 +337,14 @@ async def activate_next_item_message(item):
 
 @app.route('/get_next_meme', methods=['GET'])
 def get_next_meme():
-    global current_active_item, media_queue, cached_response
+    global current_active_item, global_queue, cached_response
     user = request.args.get("user", "").strip()
     
     if not user:
         return jsonify({"url": None})
 
-    with queue_lock:
+    with data_lock:
+        active_users.add(user)
         if user not in active_users:
             return jsonify({"url": None, "status": "inactive"})
 
@@ -329,14 +365,14 @@ def get_next_meme():
 
 @app.route('/pop_meme', methods=['POST'])
 def pop_meme():
-    global current_active_item, media_queue, cached_response
-    with queue_lock:
+    global current_active_item, global_queue, cached_response
+    with data_lock:
         if current_active_item:
             if current_active_item.get("control_message"):
                 asyncio.run_coroutine_threadsafe(safe_delete_msg(current_active_item["control_message"]), bot.loop)
             
-            if media_queue:
-                current_active_item = media_queue.pop(0)
+            if global_queue:
+                current_active_item = global_queue.pop(0)
                 asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
             else:
                 current_active_item = None
@@ -366,3 +402,4 @@ if __name__ == "__main__":
     else:
         print("[DISCORD] Tentative de connexion à l'API Discord...")
         bot.run(TOKEN)
+    

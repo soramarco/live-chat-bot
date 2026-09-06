@@ -105,11 +105,9 @@ class PersonalControlView(discord.ui.View):
                 active_users.add(self.username)
                 self.is_active = True
         
-        # On met à jour le style du bouton en fonction du *nouvel* état
         self.update_button_styles()
         
         current_pos = user_positions.get(self.username, 'center').upper()
-        # CORRECTION : On s'assure d'utiliser l'état mis à jour pour le texte
         status_text = (
             f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos}**" 
             if self.is_active 
@@ -399,60 +397,4 @@ if __name__ == "__main__":
         print("[ERREUR] Token Discord introuvable !")
     else:
         print("[DISCORD] Connexion...")
-        bot.run(TOKEN)        position = user_positions.get(user, "center")
-
-        if current_active_item:
-            res_data = {
-                "name": current_active_item["name"],
-                "avatar": current_active_item["avatar"],
-                "content": current_active_item["content"],
-                "url": current_active_item["url"],
-                "position": position
-            }
-        else:
-            res_data = {"url": None, "position": position}
-
-    return jsonify(res_data)
-
-@app.route('/pop_meme', methods=['POST'])
-def pop_meme():
-    global current_active_item, global_queue, cached_response
-    with data_lock:
-        if current_active_item:
-            if current_active_item.get("control_message"):
-                asyncio.run_coroutine_threadsafe(safe_delete_msg(current_active_item["control_message"]), bot.loop)
-            
-            if global_queue:
-                current_active_item = global_queue.pop(0)
-                asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
-            else:
-                current_active_item = None
-            cached_response["timestamp"] = 0
-            
-    return jsonify({"status": "success"})
-
-async def safe_delete_msg(msg):
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    print(f"[FLASK] Démarrage du serveur web sur le port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
-print(f"[DEBUG] Chargement complet du script...")
-
-if __name__ == "__main__":
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if not TOKEN:
-        print("[ERREUR] Le token Discord (DISCORD_TOKEN) est introuvable dans les variables d'environnement !")
-    else:
-        print("[DISCORD] Tentative de connexion à l'API Discord...")
         bot.run(TOKEN)
-    

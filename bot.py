@@ -15,7 +15,7 @@ STORAGE_FILE = "bot_storage.json"
 # Structures de données pour une file d'attente globale partagée
 global_queue = []
 current_active_item = None
-active_users = set()
+active_users = set()  # On repart à vide au redémarrage pour éviter les fantômes
 user_positions = {}
 data_lock = threading.Lock()
 
@@ -97,7 +97,7 @@ class PersonalControlView(discord.ui.View):
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
         self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v30", row=0)
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v31", row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -113,10 +113,13 @@ class PersonalControlView(discord.ui.View):
                 self.is_active = True
         
         self.update_button_styles()
+        
+        # CORRECTION ICI : on se base directement sur self.is_active pour le texte
+        current_pos = user_positions.get(self.username, 'center').upper()
         status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** Position : **{user_positions.get(self.username, 'center').upper()}**" 
+            f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos}**" 
             if self.is_active 
-            else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
+            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position actuelle : **{current_pos}**"
         )
         
         try:
@@ -134,7 +137,7 @@ class PersonalControlView(discord.ui.View):
             pass
         with data_lock:
             user_positions[self.username] = "left"
-            save_data() # Sauvegarde automatique
+            save_data()
         self.update_button_styles()
         await self.update_response(interaction)
 
@@ -146,7 +149,7 @@ class PersonalControlView(discord.ui.View):
             pass
         with data_lock:
             user_positions[self.username] = "center"
-            save_data() # Sauvegarde automatique
+            save_data()
         self.update_button_styles()
         await self.update_response(interaction)
 
@@ -158,15 +161,16 @@ class PersonalControlView(discord.ui.View):
             pass
         with data_lock:
             user_positions[self.username] = "right"
-            save_data() # Sauvegarde automatique
+            save_data()
         self.update_button_styles()
         await self.update_response(interaction)
 
     async def update_response(self, interaction):
+        current_pos = user_positions.get(self.username, 'center').upper()
         status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** Position : **{user_positions.get(self.username, 'center').upper()}**" 
+            f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos}**" 
             if self.is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position réglée sur : **{user_positions.get(self.username, 'center').upper()}**"
+            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position actuelle : **{current_pos}**"
         )
         try:
             await interaction.edit_original_response(content=status_text, view=self)
@@ -177,7 +181,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v30")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v31")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -208,8 +212,13 @@ LIVE_CHANNEL_NAME = "live-chat"
 
 @bot.event
 async def on_ready():
-    global main_panel_message
+    global main_panel_message, active_users
     print(f"[DISCORD] Bot connecté en tant que {bot.user}")
+    
+    # CORRECTION ICI : Au démarrage du bot, on vide les utilisateurs actifs pour repartir sur une base propre
+    with data_lock:
+        active_users.clear()
+
     bot.add_view(MainPanelView())
     
     for guild in bot.guilds:
@@ -390,6 +399,8 @@ def run_flask():
     port = int(os.environ.get("PORT", 5000))
     print(f"[FLASK] Démarrage du serveur web sur le port {port}...")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+print(f"[DEBUG] Chargement complet du script...")
 
 if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)

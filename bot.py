@@ -9,13 +9,11 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Fichier de sauvegarde pour la persistance sur Render
 STORAGE_FILE = "bot_storage.json"
 
-# Structures de données pour une file d'attente globale partagée
 global_queue = []
 current_active_item = None
-active_users = set()  # On repart à vide au redémarrage pour éviter les fantômes
+active_users = set()
 user_positions = {}
 data_lock = threading.Lock()
 
@@ -23,29 +21,24 @@ main_panel_message = None
 cached_response = {"data": {"url": None}, "timestamp": 0}
 
 def load_data():
-    """Charge les positions des utilisateurs depuis le fichier JSON"""
     global user_positions
     if os.path.exists(STORAGE_FILE):
         try:
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 user_positions = data.get("user_positions", {})
-                print(f"[DATA] Données chargées avec succès : {len(user_positions)} utilisateur(s) enregistré(s).")
+                print(f"[DATA] Données chargées : {len(user_positions)} utilisateur(s).")
         except Exception as e:
-            print(f"[ERREUR] Impossible de charger le fichier de stockage : {e}")
+            print(f"[ERREUR] Chargement stockage : {e}")
 
 def save_data():
-    """Sauvegarde les positions des utilisateurs dans le fichier JSON"""
     try:
-        data = {
-            "user_positions": user_positions
-        }
+        data = {"user_positions": user_positions}
         with open(STORAGE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"[ERREUR] Impossible de sauvegarder le fichier de stockage : {e}")
+        print(f"[ERREUR] Sauvegarde stockage : {e}")
 
-# Charger les données au démarrage du script
 load_data()
 
 @app.route('/')
@@ -73,7 +66,7 @@ async def update_persistent_panel():
             view = MainPanelView()
             await main_panel_message.edit(content=get_main_panel_content(), view=view)
         except Exception as e:
-            print(f"Erreur mise à jour auto du panneau : {e}")
+            print(f"Erreur mise à jour panneau : {e}")
 
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active, username):
@@ -97,7 +90,7 @@ class PersonalControlView(discord.ui.View):
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
         self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, custom_id="toggle_personal_chat_persistent_v31", row=0)
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -112,10 +105,11 @@ class PersonalControlView(discord.ui.View):
                 active_users.add(self.username)
                 self.is_active = True
         
+        # On met à jour le style du bouton en fonction du *nouvel* état
         self.update_button_styles()
         
-        # CORRECTION ICI : on se base directement sur self.is_active pour le texte
         current_pos = user_positions.get(self.username, 'center').upper()
+        # CORRECTION : On s'assure d'utiliser l'état mis à jour pour le texte
         status_text = (
             f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos}**" 
             if self.is_active 
@@ -181,7 +175,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v31")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v33")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -212,12 +206,8 @@ LIVE_CHANNEL_NAME = "live-chat"
 
 @bot.event
 async def on_ready():
-    global main_panel_message, active_users
+    global main_panel_message
     print(f"[DISCORD] Bot connecté en tant que {bot.user}")
-    
-    # CORRECTION ICI : Au démarrage du bot, on vide les utilisateurs actifs pour repartir sur une base propre
-    with data_lock:
-        active_users.clear()
 
     bot.add_view(MainPanelView())
     
@@ -353,11 +343,63 @@ def get_next_meme():
         return jsonify({"url": None})
 
     with data_lock:
-        active_users.add(user)
         if user not in active_users:
             return jsonify({"url": None, "status": "inactive"})
 
         position = user_positions.get(user, "center")
+
+        if current_active_item:
+            res_data = {
+                "name": current_active_item["name"],
+                "avatar": current_active_item["avatar"],
+                "content": current_active_item["content"],
+                "url": current_active_item["url"],
+                "position": position
+            }
+        else:
+            res_data = {"url": None, "position": position}
+
+    return jsonify(res_data)
+
+@app.route('/pop_meme', methods=['POST'])
+def pop_meme():
+    global current_active_item, global_queue, cached_response
+    with data_lock:
+        if current_active_item:
+            if current_active_item.get("control_message"):
+                asyncio.run_coroutine_threadsafe(safe_delete_msg(current_active_item["control_message"]), bot.loop)
+            
+            if global_queue:
+                current_active_item = global_queue.pop(0)
+                asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+            else:
+                current_active_item = None
+            cached_response["timestamp"] = 0
+            
+    return jsonify({"status": "success"})
+
+async def safe_delete_msg(msg):
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    print(f"[FLASK] Démarrage du serveur web sur le port {port}...")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+if __name__ == "__main__":
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if not TOKEN:
+        print("[ERREUR] Token Discord introuvable !")
+    else:
+        print("[DISCORD] Connexion...")
+        bot.run(TOKEN)        position = user_positions.get(user, "center")
 
         if current_active_item:
             res_data = {

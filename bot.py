@@ -356,12 +356,10 @@ def run_flask():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    # Lancement du serveur web Flask en arrière-plan
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Récupération et lancement du Bot Discord
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if not TOKEN:
         print("[ERREUR] Le token Discord (DISCORD_TOKEN) est introuvable dans les variables d'environnement !")

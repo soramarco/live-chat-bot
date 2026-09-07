@@ -63,14 +63,32 @@ def get_main_panel_content():
         "Clique sur le bouton ci-dessous pour gérer ton affichage et ta position :"
     )
 
-async def update_persistent_panel():
+async def refresh_or_repost_panel(channel):
     global main_panel_message
-    if main_panel_message:
-        try:
-            view = MainPanelView()
-            await main_panel_message.edit(content=get_main_panel_content(), view=view)
-        except Exception as e:
-            print(f"Erreur mise à jour panneau : {e}")
+    view = MainPanelView()
+    content = get_main_panel_content()
+    
+    try:
+        # On essaie d'abord de modifier l'ancien message s'il existe
+        if main_panel_message:
+            try:
+                await main_panel_message.edit(content=content, view=view)
+                return
+            except Exception:
+                main_panel_message = None
+
+        # Sinon, on nettoie tous les vieux panneaux pour n'en garder qu'un seul tout en bas
+        async for message in channel.history(limit=30):
+            if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                    
+        # On envoie le nouveau tout en bas
+        main_panel_message = await channel.send(content, view=view)
+    except Exception as e:
+        print(f"Erreur rafraîchissement panneau : {e}")
 
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active, username):
@@ -96,10 +114,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except Exception:
-            pass
+        await interaction.response.defer(ephemeral=True)
             
         with data_lock:
             if self.username in active_users:
@@ -124,14 +139,12 @@ class PersonalControlView(discord.ui.View):
         except Exception as e:
             print(f"Erreur mise à jour interaction : {e}")
 
-        asyncio.create_task(update_persistent_panel())
+        if main_panel_message:
+            asyncio.create_task(refresh_or_repost_panel(main_panel_message.channel))
 
     @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except Exception:
-            pass
+        await interaction.response.defer(ephemeral=True)
         with data_lock:
             user_positions[self.username] = "left"
             save_data()
@@ -140,10 +153,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1)
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except Exception:
-            pass
+        await interaction.response.defer(ephemeral=True)
         with data_lock:
             user_positions[self.username] = "center"
             save_data()
@@ -152,10 +162,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except Exception:
-            pass
+        await interaction.response.defer(ephemeral=True)
         with data_lock:
             user_positions[self.username] = "right"
             save_data()
@@ -178,12 +185,9 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v33")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v55")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except Exception:
-            pass
+        await interaction.response.defer(ephemeral=True)
             
         username = interaction.user.display_name
         with data_lock:
@@ -206,7 +210,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def is_target_channel(channel_name):
-    # Nettoie les tirets bizarres ou espaces pour éviter les bugs de renommage
     normalized = channel_name.replace("–", "-").replace("—", "-").strip().lower()
     return "live" in normalized and "chat" in normalized
 
@@ -220,23 +223,12 @@ async def on_ready():
     for guild in bot.guilds:
         for channel in guild.text_channels:
             if is_target_channel(channel.name):
-                try:
-                    async for message in channel.history(limit=50):
-                        if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
-                            try:
-                                await message.delete()
-                            except Exception:
-                                pass
-                    
-                    view = MainPanelView()
-                    main_panel_message = await channel.send(get_main_panel_content(), view=view)
-                except Exception as e:
-                    print(f"Erreur envoi panneau initial : {e}")
+                await refresh_or_repost_panel(channel)
                 break
 
 @bot.event
 async def on_message(message):
-    global current_active_item, global_queue, cached_response, main_panel_message
+    global current_active_item, global_queue, cached_response
     
     if message.author.bot:
         return
@@ -277,23 +269,9 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        try:
-            async for old_msg in message.channel.history(limit=50):
-                if old_msg.author == bot.user and ("Panneau de contrôle du Live Chat" in old_msg.content or "Gérer mon Live Chat" in old_msg.content):
-                    try:
-                        await old_msg.delete()
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"Erreur nettoyage anciens panneaux : {e}")
-
+        # On rafraîchit proprement le panneau unique pour qu'il vienne se replacer tout en bas du salon
         await asyncio.sleep(0.3)
-
-        try:
-            view = MainPanelView()
-            main_panel_message = await message.channel.send(get_main_panel_content(), view=view)
-        except Exception as e:
-            print(f"Erreur envoi nouveau panneau : {e}")
+        await refresh_or_repost_panel(message.channel)
 
     await bot.process_commands(message)
 
@@ -305,10 +283,7 @@ class ItemStopView(discord.ui.View):
 
     @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
+        await interaction.response.defer()
             
         global current_active_item, global_queue, cached_response
         with data_lock:

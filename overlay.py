@@ -13,8 +13,8 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPaint
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
-# URL brute pointant vers ton fichier sur ta branche main de GitHub
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/bot.py"
+# URL brute pointant vers ton fichier overlay.pyw sur ta branche main de GitHub
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/overlay.pyw"
 
 def check_for_updates():
     try:

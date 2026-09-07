@@ -11,6 +11,9 @@ app = Flask(__name__)
 
 STORAGE_FILE = "bot_storage.json"
 
+# ID exact du salon #live-chat récupéré depuis ton lien Discord
+TARGET_CHANNEL_ID = 1544497366814560318  
+
 global_queue = []
 current_active_item = None
 active_users = set()
@@ -69,7 +72,6 @@ async def refresh_or_repost_panel(channel):
     content = get_main_panel_content()
     
     try:
-        # On essaie d'abord de modifier l'ancien message s'il existe
         if main_panel_message:
             try:
                 await main_panel_message.edit(content=content, view=view)
@@ -77,7 +79,6 @@ async def refresh_or_repost_panel(channel):
             except Exception:
                 main_panel_message = None
 
-        # Sinon, on nettoie tous les vieux panneaux pour n'en garder qu'un seul tout en bas
         async for message in channel.history(limit=30):
             if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
                 try:
@@ -85,7 +86,6 @@ async def refresh_or_repost_panel(channel):
                 except Exception:
                     pass
                     
-        # On envoie le nouveau tout en bas
         main_panel_message = await channel.send(content, view=view)
     except Exception as e:
         print(f"Erreur rafraîchissement panneau : {e}")
@@ -185,7 +185,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v55")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v66")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
             
@@ -209,9 +209,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def is_target_channel(channel_name):
-    normalized = channel_name.replace("–", "-").replace("—", "-").strip().lower()
-    return "live" in normalized and "chat" in normalized
+def is_target_channel(channel):
+    return channel.id == TARGET_CHANNEL_ID
 
 @bot.event
 async def on_ready():
@@ -220,11 +219,11 @@ async def on_ready():
 
     bot.add_view(MainPanelView())
     
-    for guild in bot.guilds:
-        for channel in guild.text_channels:
-            if is_target_channel(channel.name):
-                await refresh_or_repost_panel(channel)
-                break
+    channel = bot.get_channel(TARGET_CHANNEL_ID)
+    if channel:
+        await refresh_or_repost_panel(channel)
+    else:
+        print("[AVERTISSEMENT] Le salon cible introuvable avec cet ID !")
 
 @bot.event
 async def on_message(message):
@@ -233,7 +232,7 @@ async def on_message(message):
     if message.author.bot:
         return
         
-    if is_target_channel(message.channel.name):
+    if is_target_channel(message.channel):
         media_url = ""
         if message.attachments:
             media_url = message.attachments[0].url
@@ -269,7 +268,6 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # On rafraîchit proprement le panneau unique pour qu'il vienne se replacer tout en bas du salon
         await asyncio.sleep(0.3)
         await refresh_or_repost_panel(message.channel)
 
@@ -384,3 +382,4 @@ if __name__ == "__main__":
     else:
         print("[DISCORD] Connexion...")
         bot.run(TOKEN)
+    

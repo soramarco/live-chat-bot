@@ -22,17 +22,16 @@ def check_for_updates():
         if response.status_code == 200:
             remote_code = response.content
             current_file_path = os.path.abspath(__file__)
-
+            
             with open(current_file_path, "rb") as f:
                 local_code = f.read()
-
+                
             if hashlib.md5(remote_code).digest() != hashlib.md5(local_code).digest():
                 print("[INFO] Une mise à jour est disponible. Téléchargement...")
                 temp_update_path = "overlay_new.pyw"
                 with open(temp_update_path, "wb") as f:
                     f.write(remote_code)
-
-                # Création d'un script batch pour contourner le verrouillage de fichier sous Windows
+                
                 batch_content = """
 @echo off
 timeout /t 2 /nobreak > nul
@@ -42,7 +41,7 @@ del "%~f0"
 """
                 with open("update.bat", "w") as b:
                     b.write(batch_content)
-
+                
                 print("[INFO] Mise à jour prête. Redémarrage...")
                 subprocess.Popen("update.bat", shell=True)
                 sys.exit(0)
@@ -63,10 +62,10 @@ class SetupDialog(QWidget):
         self.setWindowTitle("Configuration de l'Overlay Mème")
         self.setFixedSize(350, 180)
         self.setStyleSheet("background-color: #2b2d31; color: white; font-family: 'Segoe UI';")
-
+        
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
-
+        
         saved_pseudo = ""
         if os.path.exists(CONFIG_FILE):
             try:
@@ -103,26 +102,26 @@ class SetupDialog(QWidget):
 def create_discord_avatar_with_ring(pixmap):
     size = 40
     total_size = size + 8
-
+    
     result = QPixmap(total_size, total_size)
     result.fill(Qt.transparent)
-
+    
     painter = QPainter(result)
     painter.setRenderHint(QPainter.Antialiasing, True)
-
+    
     painter.setBrush(QBrush(QColor(87, 242, 135)))
     painter.setPen(Qt.NoPen)
     painter.drawEllipse(0, 0, total_size, total_size)
-
+    
     avatar_scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
+    
     path = QPainterPath()
     path.addEllipse(4, 4, size, size)
     painter.setClipPath(path)
-
+    
     painter.drawPixmap(4, 4, avatar_scaled)
     painter.end()
-
+    
     return result
 
 class WorkerSignals(QObject):
@@ -143,7 +142,7 @@ class OverlayWindow(QWidget):
         self.media_in_progress = False
         self.current_loaded_url = None
         self.is_transitioning = False
-
+        
         self.init_ui()
         self.init_network()
 
@@ -164,34 +163,34 @@ class OverlayWindow(QWidget):
 
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(40, 0, 40, 0)
-
+        
         self.container = QWidget(self)
         container_layout = QVBoxLayout(self.container)
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
-
+        
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
         header_layout.setSpacing(10)
-
+        
         self.avatar_label = QLabel(self.header_widget)
         header_layout.addWidget(self.avatar_label)
-
+        
         self.author_label = QLabel(self.header_widget)
         self.author_label.setAlignment(Qt.AlignCenter)
         self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
         self.author_label.setStyleSheet("color: white;")
-
+        
         shadow_pseudo = QGraphicsDropShadowEffect()
         shadow_pseudo.setBlurRadius(3)
         shadow_pseudo.setColor(QColor(0, 0, 0, 255))
         shadow_pseudo.setOffset(1, 1)
         self.author_label.setGraphicsEffect(shadow_pseudo)
-
+        
         header_layout.addWidget(self.author_label)
         container_layout.addWidget(self.header_widget)
-
+        
         self.media_display_label = QLabel(self.container)
         self.media_display_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.media_display_label)
@@ -202,22 +201,22 @@ class OverlayWindow(QWidget):
 
         self.media_player = QMediaPlayer(None)
         self.media_player.stateChanged.connect(self.handle_media_state_changed)
-
+        
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setWordWrap(True)
         self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
         self.text_label.setStyleSheet("color: white;")
         self.text_label.setMaximumWidth(850)
-
+        
         shadow_text = QGraphicsDropShadowEffect()
         shadow_text.setBlurRadius(3)
         shadow_text.setColor(QColor(0, 0, 0, 255))
         shadow_text.setOffset(1, 1)
         self.text_label.setGraphicsEffect(shadow_text)
-
+        
         container_layout.addWidget(self.text_label)
-
+        
         self.main_layout.addStretch(1)
         self.main_layout.addWidget(self.container)
         self.main_layout.addStretch(1)
@@ -235,7 +234,7 @@ class OverlayWindow(QWidget):
             item = self.main_layout.takeAt(0)
             if item.widget() and item.widget() != self.container:
                 item.widget().deleteLater()
-
+            
         if position == "left":
             self.main_layout.addWidget(self.container)
             self.main_layout.addStretch(1)
@@ -258,7 +257,7 @@ class OverlayWindow(QWidget):
                 res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
                 if res.status_code == 200:
                     data = res.json()
-
+                    
                     if data.get("status") == "inactive":
                         self.signals.force_close.emit()
                         break
@@ -269,7 +268,7 @@ class OverlayWindow(QWidget):
                         if self.current_loaded_url is not None:
                             self.current_loaded_url = None
                             QTimer.singleShot(0, self.hide_overlay_ui)
-                        time.sleep(0.8)
+                        time.sleep(1.5)
                         continue
 
                     elif new_url != self.current_loaded_url and not self.is_transitioning:
@@ -279,7 +278,7 @@ class OverlayWindow(QWidget):
                             media_res = requests.get(new_url, timeout=15)
                             if media_res.status_code == 200:
                                 data["content_bytes"] = media_res.content
-
+                                
                                 avatar_url = data.get("avatar", "")
                                 if avatar_url:
                                     try:
@@ -288,7 +287,7 @@ class OverlayWindow(QWidget):
                                             data["avatar_bytes"] = ar.content
                                     except:
                                         pass
-
+                                
                                 self.media_in_progress = True
                                 self.signals.update_media.emit(data)
                             else:
@@ -311,7 +310,7 @@ class OverlayWindow(QWidget):
             if self.video_capture:
                 self.video_capture.release()
                 self.video_capture = None
-
+            
             position = data.get("position", "center")
             QTimer.singleShot(0, lambda: self.update_alignment(position))
 
@@ -322,7 +321,7 @@ class OverlayWindow(QWidget):
 
             author = data.get("name", "")
             meme_txt = data.get("content", "")
-
+            
             if meme_txt:
                 self.text_label.setText(meme_txt)
                 self.text_label.show()
@@ -363,30 +362,30 @@ class OverlayWindow(QWidget):
                 self.video_file.write(content)
                 self.video_file.flush()
                 self.video_file.close()
-
+                
                 self.video_capture = cv2.VideoCapture(self.video_file.name)
-
+                
                 file_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
                 if file_fps > 5 and file_fps < 120:
                     self.fps = file_fps
                 else:
                     self.fps = 30
-
+                
                 self.container.show()
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
                 self.media_player.setVolume(100)
                 self.media_player.play()
-
+                
                 self.video_timer.start(int(1000 / self.fps))
                 self.close_timer.stop()
             else:
                 image = QImage.fromData(content)
                 pixmap = QPixmap.fromImage(image)
-
+                
                 max_size = 850
                 if pixmap.width() > max_size or pixmap.height() > max_size:
                     pixmap = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
+                    
                 self.media_display_label.setPixmap(pixmap)
                 self.container.show()
                 self.close_timer.start(7000)
@@ -400,7 +399,7 @@ class OverlayWindow(QWidget):
         if self.video_capture and self.video_capture.isOpened():
             audio_pos_sec = self.media_player.position() / 1000.0
             current_frame_pos = self.video_capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-
+            
             if abs(audio_pos_sec - current_frame_pos) > 0.15:
                 target_frame = int(audio_pos_sec * self.fps)
                 self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
@@ -429,7 +428,7 @@ class OverlayWindow(QWidget):
     def finish_media_playback(self):
         if self.is_clearing:
             return
-
+        
         self.is_clearing = True
         threading.Thread(target=self._send_pop_request, daemon=True).start()
         self.hide_overlay_ui()
@@ -443,7 +442,7 @@ class OverlayWindow(QWidget):
     def hide_overlay_ui(self):
         self.media_player.stop()
         self.video_timer.stop()
-
+        
         if self.video_capture:
             self.video_capture.release()
             self.video_capture = None
@@ -453,7 +452,7 @@ class OverlayWindow(QWidget):
         self.avatar_label.clear()
         self.text_label.clear()
         self.container.hide()
-
+        
         if self.video_file and os.path.exists(self.video_file.name):
             try:
                 self.video_file.close()
@@ -471,22 +470,22 @@ def main():
     check_for_updates()
 
     app = QApplication(sys.argv)
-
+    
     setup = SetupDialog()
     setup.show()
     app.exec_()
-
+    
     if not setup.pseudo:
         sys.exit(0)
 
     safe_pseudo_filename = "".join(c for c in setup.pseudo if c.isalnum() or c in ('_', '-'))
     lock_file_path = os.path.join(tempfile.gettempdir(), f"overlay_discord_{safe_pseudo_filename}.lock")
-
+    
     if os.path.exists(lock_file_path):
         try:
             with open(lock_file_path, "r") as f:
                 old_pid = int(f.read().strip())
-
+            
             try:
                 import psutil
                 process_exists = psutil.pid_exists(old_pid)
@@ -526,7 +525,5 @@ def main():
                 pass
         sys.exit(exit_code)
 
-if __name__ == "__main__":
-    main()
 if __name__ == "__main__":
     main()

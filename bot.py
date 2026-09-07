@@ -214,12 +214,11 @@ async def on_ready():
             if channel.name == LIVE_CHANNEL_NAME:
                 try:
                     async for message in channel.history(limit=50):
-                        if message.author == bot.user and "Panneau de contrôle du Live Chat" in message.content:
+                        if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
                             try:
                                 await message.delete()
                             except Exception:
                                 pass
-                            break
                     
                     view = MainPanelView()
                     main_panel_message = await channel.send(get_main_panel_content(), view=view)
@@ -270,10 +269,10 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Nettoyage de TOUS les anciens panneaux pour éviter les doublons ou mauvais positionnements
+        # Nettoyage large et radical de TOUS les anciens panneaux du bot dans l'historique
         try:
             async for old_msg in message.channel.history(limit=50):
-                if old_msg.author == bot.user and "Panneau de contrôle du Live Chat" in old_msg.content:
+                if old_msg.author == bot.user and ("Panneau de contrôle du Live Chat" in old_msg.content or "Gérer mon Live Chat" in old_msg.content):
                     try:
                         await old_msg.delete()
                     except Exception:
@@ -281,10 +280,10 @@ async def on_message(message):
         except Exception as e:
             print(f"Erreur nettoyage anciens panneaux : {e}")
 
-        # Petite pause pour laisser Discord appliquer les suppressions proprement
-        await asyncio.sleep(0.4)
+        # Petite pause pour laisser Discord digérer les suppressions
+        await asyncio.sleep(0.3)
 
-        # Envoi du nouveau panneau tout en bas du salon
+        # Envoi du nouveau panneau tout frais, qui sera par conséquent toujours le tout dernier message en bas
         try:
             view = MainPanelView()
             main_panel_message = await message.channel.send(get_main_panel_content(), view=view)

@@ -270,6 +270,9 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
+        # Petit délai pour laisser le message utilisateur s'afficher en premier
+        await asyncio.sleep(0.3)
+
         try:
             async for old_msg in message.channel.history(limit=30):
                 if old_msg.author == bot.user and "Panneau de contrôle du Live Chat" in old_msg.content:

@@ -270,22 +270,26 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Petit délai pour laisser le message utilisateur s'afficher en premier
-        await asyncio.sleep(0.3)
-
+        # Nettoyage de TOUS les anciens panneaux pour éviter les doublons ou mauvais positionnements
         try:
-            async for old_msg in message.channel.history(limit=30):
+            async for old_msg in message.channel.history(limit=50):
                 if old_msg.author == bot.user and "Panneau de contrôle du Live Chat" in old_msg.content:
                     try:
                         await old_msg.delete()
                     except Exception:
                         pass
-                    break
-            
+        except Exception as e:
+            print(f"Erreur nettoyage anciens panneaux : {e}")
+
+        # Petite pause pour laisser Discord appliquer les suppressions proprement
+        await asyncio.sleep(0.4)
+
+        # Envoi du nouveau panneau tout en bas du salon
+        try:
             view = MainPanelView()
             main_panel_message = await message.channel.send(get_main_panel_content(), view=view)
         except Exception as e:
-            print(f"Erreur déplacement panneau : {e}")
+            print(f"Erreur envoi nouveau panneau : {e}")
 
     await bot.process_commands(message)
 

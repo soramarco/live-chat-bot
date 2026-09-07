@@ -344,6 +344,8 @@ def get_next_meme():
 @app.route('/pop_meme', methods=['POST'])
 def pop_meme():
     global current_active_item, global_queue
+    user = request.args.get("user", "").strip()
+    
     with data_lock:
         if current_active_item:
             if current_active_item.get("control_message"):

@@ -435,7 +435,7 @@ class OverlayWindow(QWidget):
 
     def _send_pop_request(self):
         try:
-            requests.post(POP_URL, timeout=3)
+            requests.post(f"{POP_URL}?user={self.discord_pseudo}", timeout=3)
         except Exception as e:
             print(f"Erreur pop_meme : {e}")
 

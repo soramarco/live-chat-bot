@@ -72,20 +72,23 @@ async def refresh_or_repost_panel(channel):
     content = get_main_panel_content()
     
     try:
+        # Supprime l'ancien panneau en mémoire s'il existe
         if main_panel_message:
             try:
-                await main_panel_message.edit(content=content, view=view)
-                return
+                await main_panel_message.delete()
             except Exception:
-                main_panel_message = None
+                pass
+            main_panel_message = None
 
-        async for message in channel.history(limit=30):
+        # Nettoie tous les vieux panneaux qui trainent dans le salon
+        async for message in channel.history(limit=25):
             if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
                 try:
                     await message.delete()
                 except Exception:
                     pass
                     
+        # Envoie le nouveau panneau tout en bas de la discussion
         main_panel_message = await channel.send(content, view=view)
     except Exception as e:
         print(f"Erreur rafraîchissement panneau : {e}")
@@ -185,7 +188,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v66")
+    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v77")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
             
@@ -215,7 +218,7 @@ def is_target_channel(channel):
 @bot.event
 async def on_ready():
     global main_panel_message
-    print(f"[DISCORD] Bot connecté en tant que {bot.user}")
+    print(f"[DISCORD] Connexion réussie en tant que {bot.user}")
 
     bot.add_view(MainPanelView())
     
@@ -223,7 +226,7 @@ async def on_ready():
     if channel:
         await refresh_or_repost_panel(channel)
     else:
-        print("[AVERTISSEMENT] Le salon cible introuvable avec cet ID !")
+        print("[AVERTISSEMENT] Le salon cible est introuvable avec cet ID !")
 
 @bot.event
 async def on_message(message):
@@ -268,6 +271,7 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
+        # Fait descendre et réactualiser le panneau tout en bas à chaque message du salon
         await asyncio.sleep(0.3)
         await refresh_or_repost_panel(message.channel)
 
@@ -358,7 +362,8 @@ def pop_meme():
                 current_active_item = None
             cached_response["timestamp"] = 0
             
-    return jsonify({"status": "success"})
+    name = current_active_item["name"] if current_active_item else None
+    return jsonify({"status": "success", "next": name})
 
 async def safe_delete_msg(msg):
     try:
@@ -380,6 +385,5 @@ if __name__ == "__main__":
     if not TOKEN:
         print("[ERREUR] Token Discord introuvable !")
     else:
-        print("[DISCORD] Connexion...")
+        print("[DISCORD] Connexionces...")
         bot.run(TOKEN)
-    

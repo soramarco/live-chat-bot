@@ -13,7 +13,6 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPaint
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
-# URL brute pointant vers ton fichier overlay.pyw sur ta branche main de GitHub
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/overlay.pyw"
 
 def check_for_updates():
@@ -28,8 +27,10 @@ def check_for_updates():
                 
             if hashlib.md5(remote_code).digest() != hashlib.md5(local_code).digest():
                 print("[INFO] Une mise à jour est disponible. Téléchargement...")
-                with open(current_file_path, "wb") as f:
+                temp_update_path = current_file_path + ".tmp"
+                with open(temp_update_path, "wb") as f:
                     f.write(remote_code)
+                os.replace(temp_update_path, current_file_path)
                 
                 print("[INFO] Mise à jour appliquée ! Redémarrage de l'application...")
                 os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -219,7 +220,9 @@ class OverlayWindow(QWidget):
 
     def update_alignment(self, position):
         while self.main_layout.count():
-            self.main_layout.takeAt(0)
+            item = self.main_layout.takeAt(0)
+            if item.widget() and item.widget() != self.container:
+                item.widget().deleteLater()
             
         if position == "left":
             self.main_layout.addWidget(self.container)
@@ -383,9 +386,13 @@ class OverlayWindow(QWidget):
 
     def update_video_frame(self):
         if self.video_capture and self.video_capture.isOpened():
-            audio_position = self.media_player.position()
-            target_frame = int((audio_position / 1000.0) * self.fps)
-            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            audio_pos_sec = self.media_player.position() / 1000.0
+            current_frame_pos = self.video_capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            
+            # Correction de seek seulement si un décalage audio/vidéo supérieur à 150ms est détecté
+            if abs(audio_pos_sec - current_frame_pos) > 0.15:
+                target_frame = int(audio_pos_sec * self.fps)
+                self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
 
             ret, frame = self.video_capture.read()
             if ret:

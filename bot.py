@@ -108,7 +108,7 @@ class PersonalControlView(discord.ui.View):
             else:
                 active_users.add(self.username)
                 self.is_active = True
-            save_data() # Sauvegarde immédiate de l'état actif/inactif
+            save_data()
         
         self.update_button_styles()
         
@@ -205,7 +205,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-LIVE_CHANNEL_NAME = "live-chat"
+def is_target_channel(channel_name):
+    # Nettoie les tirets bizarres ou espaces pour éviter les bugs de renommage
+    normalized = channel_name.replace("–", "-").replace("—", "-").strip().lower()
+    return "live" in normalized and "chat" in normalized
 
 @bot.event
 async def on_ready():
@@ -216,7 +219,7 @@ async def on_ready():
     
     for guild in bot.guilds:
         for channel in guild.text_channels:
-            if channel.name == LIVE_CHANNEL_NAME:
+            if is_target_channel(channel.name):
                 try:
                     async for message in channel.history(limit=50):
                         if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
@@ -238,7 +241,7 @@ async def on_message(message):
     if message.author.bot:
         return
         
-    if message.channel.name == LIVE_CHANNEL_NAME:
+    if is_target_channel(message.channel.name):
         media_url = ""
         if message.attachments:
             media_url = message.attachments[0].url

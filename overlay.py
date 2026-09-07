@@ -450,7 +450,6 @@ class OverlayWindow(QWidget):
         self.is_clearing = False
 
 def main():
-    # Vérification automatique des mises à jour au tout début
     check_for_updates()
 
     app = QApplication(sys.argv)

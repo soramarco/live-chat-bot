@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 import json
+import time
 from threading import Thread
 import discord
 from discord.ext import commands
@@ -17,6 +18,7 @@ current_active_item = None
 active_users = set()
 user_positions = {}
 data_lock = threading.Lock()
+last_pop_time = 0
 
 main_panel_message = None
 cached_response = {"data": {"url": None}, "timestamp": 0}
@@ -281,8 +283,13 @@ class ItemStopView(discord.ui.View):
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
             
-        global current_active_item, global_queue, cached_response
+        global current_active_item, global_queue, cached_response, last_pop_time
         with data_lock:
+            now = time.time()
+            if now - last_pop_time < 1.5:
+                return
+            last_pop_time = now
+
             if current_active_item == self.item_ref:
                 try:
                     if self.item_ref.get("control_message"):
@@ -343,10 +350,17 @@ def get_next_meme():
 
 @app.route('/pop_meme', methods=['POST'])
 def pop_meme():
-    global current_active_item, global_queue
+    global current_active_item, global_queue, last_pop_time
     user = request.args.get("user", "").strip()
     
     with data_lock:
+        now = time.time()
+        if now - last_pop_time < 1.5:
+            name = current_active_item["name"] if current_active_item else None
+            return jsonify({"status": "ignored", "next": name})
+        
+        last_pop_time = now
+
         if current_active_item:
             if current_active_item.get("control_message"):
                 asyncio.run_coroutine_threadsafe(safe_delete_msg(current_active_item["control_message"]), bot.loop)

@@ -6,6 +6,7 @@ from io import BytesIO
 import tempfile
 import os
 import threading
+import subprocess
 import cv2
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl
@@ -27,13 +28,24 @@ def check_for_updates():
                 
             if hashlib.md5(remote_code).digest() != hashlib.md5(local_code).digest():
                 print("[INFO] Une mise à jour est disponible. Téléchargement...")
-                temp_update_path = current_file_path + ".tmp"
+                temp_update_path = "overlay_new.pyw"
                 with open(temp_update_path, "wb") as f:
                     f.write(remote_code)
-                os.replace(temp_update_path, current_file_path)
                 
-                print("[INFO] Mise à jour appliquée ! Redémarrage de l'application...")
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                # Création d'un script batch pour contourner le verrouillage de fichier sous Windows
+                batch_content = """
+@echo off
+timeout /t 2 /nobreak > nul
+move /y overlay_new.pyw overlay.pyw
+start pythonw.exe overlay.pyw
+del "%~f0"
+"""
+                with open("update.bat", "w") as b:
+                    b.write(batch_content)
+                
+                print("[INFO] Mise à jour prête. Redémarrage...")
+                subprocess.Popen("update.bat", shell=True)
+                sys.exit(0)
     except Exception as e:
         print(f"[AVERTISSEMENT] Impossible de vérifier les mises à jour : {e}")
 
@@ -389,7 +401,6 @@ class OverlayWindow(QWidget):
             audio_pos_sec = self.media_player.position() / 1000.0
             current_frame_pos = self.video_capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             
-            # Correction de seek seulement si un décalage audio/vidéo supérieur à 150ms est détecté
             if abs(audio_pos_sec - current_frame_pos) > 0.15:
                 target_frame = int(audio_pos_sec * self.fps)
                 self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)

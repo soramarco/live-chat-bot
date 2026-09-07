@@ -10,8 +10,6 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 STORAGE_FILE = "bot_storage.json"
-
-# ID exact du salon #live-chat récupéré depuis ton lien Discord
 TARGET_CHANNEL_ID = 1544497366814560318  
 
 global_queue = []
@@ -72,7 +70,6 @@ async def refresh_or_repost_panel(channel):
     content = get_main_panel_content()
     
     try:
-        # Supprime l'ancien panneau en mémoire s'il existe
         if main_panel_message:
             try:
                 await main_panel_message.delete()
@@ -80,7 +77,6 @@ async def refresh_or_repost_panel(channel):
                 pass
             main_panel_message = None
 
-        # Nettoie tous les vieux panneaux qui trainent dans le salon
         async for message in channel.history(limit=25):
             if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
                 try:
@@ -88,7 +84,6 @@ async def refresh_or_repost_panel(channel):
                 except Exception:
                     pass
                     
-        # Envoie le nouveau panneau tout en bas de la discussion
         main_panel_message = await channel.send(content, view=view)
     except Exception as e:
         print(f"Erreur rafraîchissement panneau : {e}")
@@ -271,7 +266,6 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Fait descendre et réactualiser le panneau tout en bas à chaque message du salon
         await asyncio.sleep(0.3)
         await refresh_or_repost_panel(message.channel)
 
@@ -322,7 +316,7 @@ async def activate_next_item_message(item):
 
 @app.route('/get_next_meme', methods=['GET'])
 def get_next_meme():
-    global current_active_item, global_queue, cached_response
+    global current_active_item, global_queue
     user = request.args.get("user", "").strip()
     
     if not user:
@@ -349,7 +343,7 @@ def get_next_meme():
 
 @app.route('/pop_meme', methods=['POST'])
 def pop_meme():
-    global current_active_item, global_queue, cached_response
+    global current_active_item, global_queue
     with data_lock:
         if current_active_item:
             if current_active_item.get("control_message"):
@@ -385,5 +379,5 @@ if __name__ == "__main__":
     if not TOKEN:
         print("[ERREUR] Token Discord introuvable !")
     else:
-        print("[DISCORD] Connexionces...")
+        print("[DISCORD] Connexion en cours...")
         bot.run(TOKEN)

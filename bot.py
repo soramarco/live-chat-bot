@@ -21,19 +21,23 @@ main_panel_message = None
 cached_response = {"data": {"url": None}, "timestamp": 0}
 
 def load_data():
-    global user_positions
+    global user_positions, active_users
     if os.path.exists(STORAGE_FILE):
         try:
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 user_positions = data.get("user_positions", {})
-                print(f"[DATA] Données chargées : {len(user_positions)} utilisateur(s).")
+                active_users = set(data.get("active_users", []))
+                print(f"[DATA] Données chargées : {len(user_positions)} utilisateur(s), {len(active_users)} actif(s).")
         except Exception as e:
             print(f"[ERREUR] Chargement stockage : {e}")
 
 def save_data():
     try:
-        data = {"user_positions": user_positions}
+        data = {
+            "user_positions": user_positions,
+            "active_users": list(active_users)
+        }
         with open(STORAGE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
     except Exception as e:
@@ -104,6 +108,7 @@ class PersonalControlView(discord.ui.View):
             else:
                 active_users.add(self.username)
                 self.is_active = True
+            save_data() # Sauvegarde immédiate de l'état actif/inactif
         
         self.update_button_styles()
         
@@ -269,7 +274,6 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Nettoyage large et radical de TOUS les anciens panneaux du bot dans l'historique
         try:
             async for old_msg in message.channel.history(limit=50):
                 if old_msg.author == bot.user and ("Panneau de contrôle du Live Chat" in old_msg.content or "Gérer mon Live Chat" in old_msg.content):
@@ -280,10 +284,8 @@ async def on_message(message):
         except Exception as e:
             print(f"Erreur nettoyage anciens panneaux : {e}")
 
-        # Petite pause pour laisser Discord digérer les suppressions
         await asyncio.sleep(0.3)
 
-        # Envoi du nouveau panneau tout frais, qui sera par conséquent toujours le tout dernier message en bas
         try:
             view = MainPanelView()
             main_panel_message = await message.channel.send(get_main_panel_content(), view=view)

@@ -8,6 +8,7 @@ import os
 import threading
 import subprocess
 import cv2
+import json
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath
@@ -200,7 +201,6 @@ class OverlayWindow(QWidget):
         self.signals.force_close.connect(QApplication.quit)
 
         self.media_player = QMediaPlayer(None)
-        self.media_player.stateChanged.connect(self.handle_media_state_changed)
         
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
@@ -252,20 +252,32 @@ class OverlayWindow(QWidget):
         t.start()
 
     def network_worker(self):
+        print(f"[NETWORK] Démarrage du thread d'écoute pour l'utilisateur: {self.discord_pseudo}")
         while True:
             try:
                 res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
                 if res.status_code == 200:
-                    data = res.json()
+                    try:
+                        data = res.json()
+                    except json.JSONDecodeError:
+                        print(f"[NETWORK] Réponse non-JSON reçue du serveur : {res.text}")
+                        time.sleep(1.5)
+                        continue
                     
                     if data.get("status") == "inactive":
+                        print("[NETWORK] Statut inactif reçu, fermeture.")
                         self.signals.force_close.emit()
                         break
 
                     new_url = data.get("url")
 
+                    # Log de débogage pour voir ce que le serveur renvoie exactement
+                    if new_url:
+                        print(f"[NETWORK] Média détecté par l'API : {new_url}")
+
                     if not new_url:
                         if self.current_loaded_url is not None:
+                            print("[NETWORK] Plus de média actif, masquage de l'overlay.")
                             self.current_loaded_url = None
                             QTimer.singleShot(0, self.hide_overlay_ui)
                         time.sleep(1.5)
@@ -274,6 +286,7 @@ class OverlayWindow(QWidget):
                     elif new_url != self.current_loaded_url and not self.is_transitioning:
                         self.is_transitioning = True
                         self.current_loaded_url = new_url
+                        print(f"[NETWORK] Téléchargement du nouveau média : {new_url}")
                         try:
                             media_res = requests.get(new_url, timeout=15)
                             if media_res.status_code == 200:
@@ -291,20 +304,22 @@ class OverlayWindow(QWidget):
                                 self.media_in_progress = True
                                 self.signals.update_media.emit(data)
                             else:
+                                print(f"[NETWORK] Échec du téléchargement du fichier média (Code: {media_res.status_code})")
                                 self.is_transitioning = False
                         except Exception as e:
-                            print(f"Erreur téléchargement média : {e}")
+                            print(f"[NETWORK] Erreur lors du téléchargement du média : {e}")
                             self.is_transitioning = False
                     else:
                         time.sleep(1.5)
                 else:
                     time.sleep(1.5)
             except Exception as e:
-                print(f"Erreur requête serveur : {e}")
+                print(f"[NETWORK] Erreur de requête serveur : {e}")
                 time.sleep(2)
 
     def handle_new_media(self, data):
         try:
+            print("[UI] Affichage du nouveau média sur l'overlay...")
             self.media_player.stop()
             self.video_timer.stop()
             if self.video_capture:
@@ -390,20 +405,13 @@ class OverlayWindow(QWidget):
                 self.container.show()
                 self.close_timer.start(7000)
         except Exception as e:
-            print(f"Erreur handle_new_media : {e}")
+            print(f"[UI] Erreur dans handle_new_media : {e}")
             self.hide_overlay_ui()
         finally:
             self.is_transitioning = False
 
     def update_video_frame(self):
         if self.video_capture and self.video_capture.isOpened():
-            audio_pos_sec = self.media_player.position() / 1000.0
-            current_frame_pos = self.video_capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-            
-            if abs(audio_pos_sec - current_frame_pos) > 0.15:
-                target_frame = int(audio_pos_sec * self.fps)
-                self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-
             ret, frame = self.video_capture.read()
             if ret:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -412,7 +420,10 @@ class OverlayWindow(QWidget):
                 qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self.signals.video_frame_ready.emit(qt_image)
             else:
+                # Fin de la vidéo atteinte par OpenCV
+                print("[VIDEO] Fin de la lecture de la vidéo atteinte.")
                 self.video_timer.stop()
+                self.finish_media_playback()
 
     def display_frame(self, image):
         pixmap = QPixmap.fromImage(image)
@@ -421,23 +432,21 @@ class OverlayWindow(QWidget):
             pixmap = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.media_display_label.setPixmap(pixmap)
 
-    def handle_media_state_changed(self, state):
-        if state == QMediaPlayer.StoppedState and not self.is_clearing and not self.is_transitioning:
-            QTimer.singleShot(100, self.finish_media_playback)
-
     def finish_media_playback(self):
         if self.is_clearing:
             return
         
         self.is_clearing = True
+        print("[PLAYBACK] Fin du média, envoi de la requête pop au serveur...")
         threading.Thread(target=self._send_pop_request, daemon=True).start()
         self.hide_overlay_ui()
 
     def _send_pop_request(self):
         try:
-            requests.post(f"{POP_URL}?user={self.discord_pseudo}", timeout=3)
+            res = requests.post(f"{POP_URL}?user={self.discord_pseudo}", timeout=3)
+            print(f"[NETWORK] Requête pop envoyée (Code: {res.status_code})")
         except Exception as e:
-            print(f"Erreur pop_meme : {e}")
+            print(f"[NETWORK] Erreur pop_meme : {e}")
 
     def hide_overlay_ui(self):
         self.media_player.stop()

@@ -201,6 +201,8 @@ class OverlayWindow(QWidget):
         self.signals.force_close.connect(QApplication.quit)
 
         self.media_player = QMediaPlayer(None)
+        # Écoute de la fin de la lecture du fichier audio/vidéo
+        self.media_player.mediaStatusChanged.connect(self.on_media_status_changed)
         
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
@@ -228,6 +230,12 @@ class OverlayWindow(QWidget):
 
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self.update_video_frame)
+
+    def on_media_status_changed(self, status):
+        # Fin réelle du média détectée par le lecteur audio
+        if status == QMediaPlayer.EndOfMedia:
+            print("[PLAYBACK] Fin de la lecture audio/vidéo atteinte.")
+            self.finish_media_playback()
 
     def update_alignment(self, position):
         while self.main_layout.count():
@@ -271,7 +279,6 @@ class OverlayWindow(QWidget):
 
                     new_url = data.get("url")
 
-                    # Log de débogage pour voir ce que le serveur renvoie exactement
                     if new_url:
                         print(f"[NETWORK] Média détecté par l'API : {new_url}")
 
@@ -411,19 +418,36 @@ class OverlayWindow(QWidget):
             self.is_transitioning = False
 
     def update_video_frame(self):
-        if self.video_capture and self.video_capture.isOpened():
-            ret, frame = self.video_capture.read()
-            if ret:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = frame.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                self.signals.video_frame_ready.emit(qt_image)
-            else:
-                # Fin de la vidéo atteinte par OpenCV
-                print("[VIDEO] Fin de la lecture de la vidéo atteinte.")
-                self.video_timer.stop()
-                self.finish_media_playback()
+        if not (self.video_capture and self.video_capture.isOpened()):
+            return
+
+        # Synchronisation précise des images avec la position réelle du lecteur audio
+        if self.media_player.state() == QMediaPlayer.PlayingState:
+            pos_ms = self.media_player.position()
+            target_frame = int((pos_ms / 1000.0) * self.fps)
+            current_frame = int(self.video_capture.get(cv2.CAP_PROP_POS_FRAMES))
+
+            # Si l'image a du retard sur le son, on saute des images
+            while current_frame < target_frame - 1:
+                if not self.video_capture.grab():
+                    break
+                current_frame += 1
+
+            # Si l'image est en avance sur le son, on attend le cycle suivant
+            if current_frame > target_frame + 1:
+                return
+
+        ret, frame = self.video_capture.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            self.signals.video_frame_ready.emit(qt_image)
+        else:
+            # Fin des images vidéo atteinte par OpenCV : on coupe le timer vidéo 
+            # mais on laisse QMediaPlayer terminer le son entièrement
+            self.video_timer.stop()
 
     def display_frame(self, image):
         pixmap = QPixmap.fromImage(image)

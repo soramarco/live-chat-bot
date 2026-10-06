@@ -17,6 +17,7 @@ global_queue = []
 current_active_item = None
 active_users = set()
 user_positions = {}
+user_game_modes = {}  # Nouveau : stockage du Mode Jeu (True / False) par utilisateur
 data_lock = threading.Lock()
 last_pop_time = 0
 
@@ -24,13 +25,14 @@ main_panel_message = None
 cached_response = {"data": {"url": None}, "timestamp": 0}
 
 def load_data():
-    global user_positions, active_users
+    global user_positions, active_users, user_game_modes
     if os.path.exists(STORAGE_FILE):
         try:
             with open(STORAGE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 user_positions = data.get("user_positions", {})
                 active_users = set(data.get("active_users", []))
+                user_game_modes = data.get("user_game_modes", {})
                 print(f"[DATA] Données chargées : {len(user_positions)} utilisateur(s), {len(active_users)} actif(s).")
         except Exception as e:
             print(f"[ERREUR] Chargement stockage : {e}")
@@ -39,7 +41,8 @@ def save_data():
     try:
         data = {
             "user_positions": user_positions,
-            "active_users": list(active_users)
+            "active_users": list(active_users),
+            "user_game_modes": user_game_modes
         }
         with open(STORAGE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
@@ -98,6 +101,7 @@ class PersonalControlView(discord.ui.View):
         self.update_button_styles()
 
     def update_button_styles(self):
+        # Bouton On / Off
         if self.is_active:
             self.toggle_btn.label = "Désactiver mon Live Chat"
             self.toggle_btn.style = discord.ButtonStyle.danger
@@ -107,6 +111,18 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
+        # Bouton Mode Jeu
+        is_gm = user_game_modes.get(self.username, False)
+        if is_gm:
+            self.btn_game_mode.label = "Mode Jeu : ACTIF"
+            self.btn_game_mode.style = discord.ButtonStyle.success
+            self.btn_game_mode.emoji = "🎮"
+        else:
+            self.btn_game_mode.label = "Mode Jeu : INACTIF"
+            self.btn_game_mode.style = discord.ButtonStyle.secondary
+            self.btn_game_mode.emoji = "🎮"
+
+        # Boutons de position
         pos = user_positions.get(self.username, "center")
         self.btn_left.style = discord.ButtonStyle.primary if pos == "left" else discord.ButtonStyle.secondary
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
@@ -126,21 +142,20 @@ class PersonalControlView(discord.ui.View):
             save_data()
         
         self.update_button_styles()
-        
-        current_pos = user_positions.get(self.username, 'center').upper()
-        status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos}**" 
-            if self.is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position actuelle : **{current_pos}**"
-        )
-        
-        try:
-            await interaction.edit_original_response(content=status_text, view=self)
-        except Exception as e:
-            print(f"Erreur mise à jour interaction : {e}")
+        await self.update_response(interaction)
 
         if main_panel_message:
             asyncio.create_task(refresh_or_repost_panel(main_panel_message.channel))
+
+    @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        with data_lock:
+            current_gm = user_game_modes.get(self.username, False)
+            user_game_modes[self.username] = not current_gm
+            save_data()
+        self.update_button_styles()
+        await self.update_response(interaction)
 
     @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -171,15 +186,16 @@ class PersonalControlView(discord.ui.View):
 
     async def update_response(self, interaction):
         current_pos = user_positions.get(self.username, 'center').upper()
+        gm_status = "OUI" if user_game_modes.get(self.username, False) else "NON"
         status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos}**" 
+            f"🟢 **Ton Live Chat est ACTIF !** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**" 
             if self.is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position actuelle : **{current_pos}**"
+            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
         )
         try:
             await interaction.edit_original_response(content=status_text, view=self)
         except Exception as e:
-            print(f"Erreur mise à jour position : {e}")
+            print(f"Erreur mise à jour position/mode jeu : {e}")
 
 class MainPanelView(discord.ui.View):
     def __init__(self):
@@ -192,12 +208,13 @@ class MainPanelView(discord.ui.View):
         username = interaction.user.display_name
         with data_lock:
             is_active = username in active_users
-            current_pos = user_positions.get(username, "center")
+            current_pos = user_positions.get(username, "center").upper()
+            gm_status = "OUI" if user_game_modes.get(username, False) else "NON"
         
         status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** Position : **{current_pos.upper()}**" 
+            f"🟢 **Ton Live Chat est ACTIF !** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**" 
             if is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** Position actuelle : **{current_pos.upper()}**"
+            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
         )
         view = PersonalControlView(is_active, username)
         try:
@@ -334,6 +351,7 @@ def get_next_meme():
             return jsonify({"url": None, "status": "inactive"})
 
         position = user_positions.get(user, "center")
+        game_mode = user_game_modes.get(user, False)
 
         if current_active_item:
             res_data = {
@@ -341,10 +359,11 @@ def get_next_meme():
                 "avatar": current_active_item["avatar"],
                 "content": current_active_item["content"],
                 "url": current_active_item["url"],
-                "position": position
+                "position": position,
+                "game_mode": game_mode
             }
         else:
-            res_data = {"url": None, "position": position}
+            res_data = {"url": None, "position": position, "game_mode": game_mode}
 
     return jsonify(res_data)
 

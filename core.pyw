@@ -100,8 +100,7 @@ class SetupDialog(QWidget):
                 pass
             self.close()
 
-def create_discord_avatar_with_ring(pixmap):
-    size = 40
+def create_discord_avatar_with_ring(pixmap, size=40):
     total_size = size + 8
     
     result = QPixmap(total_size, total_size)
@@ -143,6 +142,7 @@ class OverlayWindow(QWidget):
         self.media_in_progress = False
         self.current_loaded_url = None
         self.is_transitioning = False
+        self.current_max_size = 850
         
         self.init_ui()
         self.init_network()
@@ -201,7 +201,6 @@ class OverlayWindow(QWidget):
         self.signals.force_close.connect(QApplication.quit)
 
         self.media_player = QMediaPlayer(None)
-        # Écoute de la fin de la lecture du fichier audio/vidéo
         self.media_player.mediaStatusChanged.connect(self.on_media_status_changed)
         
         self.text_label = QLabel(self.container)
@@ -232,7 +231,6 @@ class OverlayWindow(QWidget):
         self.video_timer.timeout.connect(self.update_video_frame)
 
     def on_media_status_changed(self, status):
-        # Fin réelle du média détectée par le lecteur audio
         if status == QMediaPlayer.EndOfMedia:
             print("[PLAYBACK] Fin de la lecture audio/vidéo atteinte.")
             self.finish_media_playback()
@@ -334,6 +332,22 @@ class OverlayWindow(QWidget):
                 self.video_capture = None
             
             position = data.get("position", "center")
+            is_game_mode = data.get("game_mode", False)
+            
+            # Ajustement dynamique des dimensions en fonction du Mode Jeu
+            if is_game_mode:
+                self.current_max_size = 450
+                self.author_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
+                self.text_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
+                self.text_label.setMaximumWidth(450)
+                avatar_size = 28
+            else:
+                self.current_max_size = 850
+                self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
+                self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
+                self.text_label.setMaximumWidth(850)
+                avatar_size = 40
+
             QTimer.singleShot(0, lambda: self.update_alignment(position))
 
             url = data.get("url")
@@ -356,7 +370,7 @@ class OverlayWindow(QWidget):
             if avatar_bytes:
                 img = QImage.fromData(avatar_bytes)
                 pix = QPixmap.fromImage(img)
-                ring_pixmap = create_discord_avatar_with_ring(pix)
+                ring_pixmap = create_discord_avatar_with_ring(pix, size=avatar_size)
                 self.avatar_label.setPixmap(ring_pixmap)
                 self.avatar_label.show()
             else:
@@ -404,9 +418,8 @@ class OverlayWindow(QWidget):
                 image = QImage.fromData(content)
                 pixmap = QPixmap.fromImage(image)
                 
-                max_size = 850
-                if pixmap.width() > max_size or pixmap.height() > max_size:
-                    pixmap = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
+                    pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     
                 self.media_display_label.setPixmap(pixmap)
                 self.container.show()
@@ -421,19 +434,16 @@ class OverlayWindow(QWidget):
         if not (self.video_capture and self.video_capture.isOpened()):
             return
 
-        # Synchronisation précise des images avec la position réelle du lecteur audio
         if self.media_player.state() == QMediaPlayer.PlayingState:
             pos_ms = self.media_player.position()
             target_frame = int((pos_ms / 1000.0) * self.fps)
             current_frame = int(self.video_capture.get(cv2.CAP_PROP_POS_FRAMES))
 
-            # Si l'image a du retard sur le son, on saute des images
             while current_frame < target_frame - 1:
                 if not self.video_capture.grab():
                     break
                 current_frame += 1
 
-            # Si l'image est en avance sur le son, on attend le cycle suivant
             if current_frame > target_frame + 1:
                 return
 
@@ -445,15 +455,12 @@ class OverlayWindow(QWidget):
             qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.signals.video_frame_ready.emit(qt_image)
         else:
-            # Fin des images vidéo atteinte par OpenCV : on coupe le timer vidéo 
-            # mais on laisse QMediaPlayer terminer le son entièrement
             self.video_timer.stop()
 
     def display_frame(self, image):
         pixmap = QPixmap.fromImage(image)
-        max_size = 850
-        if pixmap.width() > max_size or pixmap.height() > max_size:
-            pixmap = pixmap.scaled(max_size, max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
+            pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.media_display_label.setPixmap(pixmap)
 
     def finish_media_playback(self):

@@ -99,7 +99,7 @@ class SetupDialog(QWidget):
                     f.write(text)
             except:
                 pass
-            self.close()
+            self.hide()
 
 def create_discord_avatar_with_ring(pixmap, size=40):
     total_size = size + 8
@@ -513,8 +513,8 @@ class OverlayWindow(QWidget):
             print(f"[NETWORK] Erreur pop_meme : {e}")
 
     def hide_overlay_ui(self):
-        self.media_player.stop()
         self.video_timer.stop()
+        self.media_player.stop()
         
         if self.video_capture:
             self.video_capture.release()

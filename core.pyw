@@ -286,8 +286,9 @@ class OverlayWindow(QWidget):
                         time.sleep(1.5)
                         continue
                     
+                    # VÉRIFICATION STRICTE DU STATUT INACTIF POUR FERMER L'OVERLAY
                     if data.get("status") == "inactive":
-                        print("[NETWORK] Statut inactif reçu du bot, fermeture immédiate.")
+                        print("[NETWORK] Statut inactif reçu, fermeture immédiate de l'overlay.")
                         self.signals.force_close.emit()
                         break
 
@@ -412,12 +413,12 @@ class OverlayWindow(QWidget):
                 self.video_file.flush()
                 self.video_file.close()
                 
-                # Initialisation de QMediaPlayer
+                # QMediaPlayer démarre en premier
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
                 self.media_player.setVolume(100)
                 self.media_player.play()
 
-                # Micro-délai pour laisser le handle de fichier se stabiliser sous Windows
+                # Délai de stabilisation anti-verrouillage Windows
                 time.sleep(0.05)
                 self.video_capture = cv2.VideoCapture(self.video_file.name)
                 

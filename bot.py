@@ -238,43 +238,81 @@ def is_target_channel(channel):
     return channel.id == TARGET_CHANNEL_ID
 
 
-async def repost_bottom_panel(channel):
-    """Met à jour le panneau en place au lieu d'en créer un vierge à chaque message."""
+panel_update_lock = asyncio.Lock()
+
+
+async def repost_bottom_panel(channel, move_to_bottom=False):
+    """Maintient un panneau unique. Sur un message utilisateur, le recrée en bas.
+
+    Discord ne permet pas de déplacer un message existant : pour qu'il reste le
+    dernier message du salon, il faut en envoyer un nouveau puis supprimer l'ancien.
+    Les états des boutons sont recalculés depuis le stockage avant chaque envoi.
+    """
     global panel_message, panel_channel_id
-    try:
-        chosen_user = get_panel_username()
-        content = get_channel_panel_content()
-        view = UnifiedControlView(chosen_user)
+    async with panel_update_lock:
+        try:
+            chosen_user = get_panel_username()
+            content = get_channel_panel_content()
+            view = UnifiedControlView(chosen_user)
 
-        if panel_message is not None and panel_channel_id == channel.id:
-            try:
-                await panel_message.edit(content=content, view=view)
+            if move_to_bottom:
+                # Récupère l'ancien panneau et les éventuels doublons (notamment
+                # après un redémarrage où la référence Python a été perdue).
+                old_panels = []
+                if panel_message is not None and panel_channel_id == channel.id:
+                    old_panels.append(panel_message)
+
+                async for old_msg in channel.history(limit=50):
+                    if (old_msg.author == bot.user
+                            and "Statut en direct" in (old_msg.content or "")
+                            and all(old_msg.id != item.id for item in old_panels)):
+                        old_panels.append(old_msg)
+
+                # Envoi d'abord le nouveau panneau : si l'envoi échoue, l'ancien
+                # reste utilisable. Les données persistées gardent l'état choisi.
+                new_panel = await channel.send(content=content, view=view)
+                panel_message = new_panel
+                panel_channel_id = channel.id
+                for old_msg in old_panels:
+                    if old_msg.id == new_panel.id:
+                        continue
+                    try:
+                        await old_msg.delete()
+                    except Exception as e:
+                        print(f"Impossible de supprimer l'ancien panneau {old_msg.id} : {e}")
                 return
-            except Exception:
-                panel_message = None
-                panel_channel_id = None
 
-        # Après un redémarrage, retrouver le panneau déjà présent si possible.
-        existing = []
-        async for old_msg in channel.history(limit=50):
-            if old_msg.author == bot.user and "Statut en direct" in old_msg.content:
-                existing.append(old_msg)
-
-        existing.sort(key=lambda msg: msg.created_at, reverse=True)
-        if existing:
-            panel_message = existing[0]
-            panel_channel_id = channel.id
-            await panel_message.edit(content=content, view=view)
-            for duplicate in existing[1:]:
+            # À la connexion ou après un clic, on édite le panneau existant sans
+            # le déplacer inutilement ; le prochain message utilisateur le remettra
+            # ensuite en bas du salon.
+            if panel_message is not None and panel_channel_id == channel.id:
                 try:
-                    await duplicate.delete()
+                    await panel_message.edit(content=content, view=view)
+                    return
                 except Exception:
-                    pass
-        else:
-            panel_message = await channel.send(content=content, view=view)
-            panel_channel_id = channel.id
-    except Exception as e:
-        print(f"Erreur mise à jour panneau bas : {e}")
+                    panel_message = None
+                    panel_channel_id = None
+
+            existing = []
+            async for old_msg in channel.history(limit=50):
+                if old_msg.author == bot.user and "Statut en direct" in (old_msg.content or ""):
+                    existing.append(old_msg)
+
+            existing.sort(key=lambda msg: msg.created_at, reverse=True)
+            if existing:
+                panel_message = existing[0]
+                panel_channel_id = channel.id
+                await panel_message.edit(content=content, view=view)
+                for duplicate in existing[1:]:
+                    try:
+                        await duplicate.delete()
+                    except Exception:
+                        pass
+            else:
+                panel_message = await channel.send(content=content, view=view)
+                panel_channel_id = channel.id
+        except Exception as e:
+            print(f"Erreur mise à jour panneau bas : {e}")
 
 
 @bot.event
@@ -322,13 +360,17 @@ async def on_message(message):
                 else:
                     global_queue.append(item)
                     is_first = False
-            bot.loop.create_task(send_control_message(item, is_active=is_first))
+            # Le message de contrôle du média est envoyé avant le panneau : le
+            # panneau pourra ainsi finir tout en bas, après tous les messages du bot.
+            await send_control_message(item, is_active=is_first)
 
-        # Même après un nouveau média, garder les réglages du dernier utilisateur
-        # et éditer le même message : ne pas réinitialiser les boutons.
-        await repost_bottom_panel(message.channel)
 
     await bot.process_commands(message)
+
+    # Replacer le panneau tout à la fin APRÈS le traitement du message et les
+    # éventuelles réponses de commande, sans perdre l'état sauvegardé des boutons.
+    if is_target_channel(message.channel):
+        await repost_bottom_panel(message.channel, move_to_bottom=True)
 
 
 class ItemStopView(discord.ui.View):

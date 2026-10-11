@@ -150,7 +150,6 @@ class OverlayWindow(QWidget):
         self.image_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.image_label)
 
-        # Utilisation d'une vue graphique (Graphics View) pour un rendu vidéo fluide et sans bug de transparence Windows
         self.graphics_view = QGraphicsView(self.container)
         self.graphics_view.setFixedSize(850, 480)
         self.graphics_view.setStyleSheet("background: transparent; border: none;")
@@ -227,6 +226,7 @@ class OverlayWindow(QWidget):
                 res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
                 if res.status_code == 200:
                     data = res.json()
+                    # Si l'utilisateur a désactivé son live chat sur Discord, on ferme l'app proprement
                     if data.get("status") == "inactive":
                         print("[NETWORK] Statut inactif sur Discord, fermeture automatique...")
                         QTimer.singleShot(0, QApplication.quit)
@@ -405,7 +405,23 @@ class OverlayWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     
-    # Vérification anti-double instance (si le fichier lock existe déjà)
+    # Nettoyage intelligent du fichier lock s'il est orphelin (ex: crash ou kill du gestionnaire des tâches)
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r") as f:
+                pid = int(f.read().strip())
+            # Vérifie si le processus tourne encore réellement sur Windows
+            import psutil
+            if not psutil.pid_exists(pid):
+                os.remove(LOCK_FILE)
+        except Exception:
+            # Si psutil n'est pas installé ou en cas de doute après un certain temps, on nettoie
+            try:
+                if time.time() - os.path.getmtime(LOCK_FILE) > 10:
+                    os.remove(LOCK_FILE)
+            except:
+                pass
+
     if os.path.exists(LOCK_FILE):
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Warning)
@@ -435,7 +451,6 @@ def main():
     
     exit_code = app.exec_()
     
-    # Nettoyage du fichier lock à la fermeture
     if os.path.exists(LOCK_FILE):
         try:
             os.remove(LOCK_FILE)

@@ -391,23 +391,24 @@ class ItemStopView(discord.ui.View):
         await interaction.response.defer()
         global current_active_item, global_queue, last_pop_time
         with data_lock:
-            now = time.time()
-            if now - last_pop_time < 1.5:
+            # Le Stop manuel ne doit pas être ignoré parce qu'un média précédent
+            # vient de finir. Le /pop_meme tardif de cet ancien média est protégé
+            # par item_id dans l'endpoint et ne pourra pas supprimer le suivant.
+            if current_active_item != self.item_ref:
                 return
-            last_pop_time = now
-            if current_active_item == self.item_ref:
-                try:
-                    if self.item_ref.get("control_message"):
-                        await self.item_ref["control_message"].delete()
-                except Exception:
-                    pass
-                if global_queue:
-                    current_active_item = global_queue.pop(0)
-                    asyncio.run_coroutine_threadsafe(
-                        activate_next_item_message(current_active_item), bot.loop
-                    )
-                else:
-                    current_active_item = None
+            last_pop_time = time.time()
+            try:
+                if self.item_ref.get("control_message"):
+                    await self.item_ref["control_message"].delete()
+            except Exception:
+                pass
+            if global_queue:
+                current_active_item = global_queue.pop(0)
+                asyncio.run_coroutine_threadsafe(
+                    activate_next_item_message(current_active_item), bot.loop
+                )
+            else:
+                current_active_item = None
 
 
 async def send_control_message(item, is_active):
@@ -471,7 +472,22 @@ def get_next_meme():
 def pop_meme():
     global current_active_item, global_queue, last_pop_time
     user = request.args.get("user", "").strip()
+    requested_item_id = request.args.get("item_id", "").strip()
     with data_lock:
+        # Le client peut terminer une vidéo pile au moment où le bouton Stop a
+        # déjà remplacé l'élément actif. Un pop tardif doit alors être ignoré,
+        # sinon il enlève aussi le suivant de la file.
+        if requested_item_id:
+            current_item_id = None
+            if current_active_item:
+                current_item_id = str(
+                    current_active_item.get("item_id")
+                    or getattr(current_active_item.get("message_obj"), "id", current_active_item.get("url", ""))
+                )
+            if current_item_id != requested_item_id:
+                name = current_active_item["name"] if current_active_item else None
+                return jsonify({"status": "stale", "next": name, "current_item_id": current_item_id})
+
         now = time.time()
         if now - last_pop_time < 1.5:
             name = current_active_item["name"] if current_active_item else None

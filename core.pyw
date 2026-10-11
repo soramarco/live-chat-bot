@@ -1032,20 +1032,21 @@ class OverlayWindow(QWidget):
         if self.current_loaded_url is None or img is None or img.isNull():
             return
         try:
-            # Garder les frames à leur taille native lorsqu'elles tiennent dans
-            # le cadre. En mode normal, ne pas agrandir inutilement chaque frame
-            # en plein écran : Windows/Qt composent plus fiablement ces pixmaps
-            # sur le bureau transparent. Réduire uniquement si le cadre l'exige.
+            # Toujours rendre la frame à la taille maximale disponible du QLabel,
+            # en conservant son ratio. En mode jeu, cela réduit les vidéos au cadre
+            # compact ; en mode normal, cela AGRANDIT aussi les frames plus petites
+            # (par ex. 638x360 vers 850x480). Le comportement précédent ne réduisait
+            # que les grandes frames : certaines vidéos paysage restaient en pixmap
+            # sous-dimensionné dans la fenêtre translucide et n'étaient pas composées
+            # correctement par Windows, alors que les mêmes vidéos fonctionnaient
+            # en mode jeu car elles étaient forcément redimensionnées.
             box = self.video_label.size()
             if box.width() <= 0 or box.height() <= 0:
                 return
-            if img.width() > box.width() or img.height() > box.height():
-                target = img.size().scaled(box, Qt.KeepAspectRatio)
-                if target.isEmpty():
-                    return
-                frame = img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            else:
-                frame = img.copy()
+            target = img.size().scaled(box, Qt.KeepAspectRatio)
+            if target.isEmpty():
+                return
+            frame = img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             pixmap = QPixmap.fromImage(frame)
             if pixmap.isNull():
                 log("Image vidéo reçue mais conversion en QPixmap impossible")
@@ -1064,8 +1065,9 @@ class OverlayWindow(QWidget):
                 self.video_label.update()
             self._video_frames_shown += 1
             if self._video_frames_shown == 1:
-                log(f"Première image envoyée au QLabel natif : {pixmap.width()}x{pixmap.height()}, "
-                    f"zone {self.video_label.width()}x{self.video_label.height()}, "
+                log(f"Première image envoyée au QLabel natif : source={img.width()}x{img.height()}, "
+                    f"affichage={pixmap.width()}x{pixmap.height()}, "
+                    f"zone={self.video_label.width()}x{self.video_label.height()}, "
                     f"mode_jeu={self.current_game_mode}, visible={self.video_label.isVisible()}")
         except Exception:
             log("Erreur d'affichage d'une frame vidéo :\n" + traceback.format_exc())

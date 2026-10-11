@@ -11,7 +11,7 @@ import subprocess
 import cv2
 import json
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl, QPropertyAnimation, QEasingCurve, QPoint
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QGraphicsOpacityEffect
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -177,12 +177,10 @@ class OverlayWindow(QWidget):
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
         
-        # Opacité pour le fondu d'entrée unique
         self.opacity_effect = QGraphicsOpacityEffect(self.container)
         self.container.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
 
-        # En-tête (Avatar + Pseudo fixes dans le layout)
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
@@ -243,8 +241,7 @@ class OverlayWindow(QWidget):
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self.update_video_frame)
 
-    def animate_floating_header(self):
-        # Effet flottant appliqué uniquement sur les marges intérieures de l'avatar pour un mouvement organique
+    def animate_floating_avatar(self):
         if self.container.isVisible():
             self.float_angle += 0.08
             offset_y = int(math.sin(self.float_angle) * 3)
@@ -354,7 +351,6 @@ class OverlayWindow(QWidget):
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
             
-            # Gestion stricte du format selon le Mode Jeu
             if is_game_mode:
                 self.current_max_size = 380
                 self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
@@ -430,7 +426,6 @@ class OverlayWindow(QWidget):
                 
                 self.container.show()
                 
-                # Fondu d'entrée unique (Fade-in 350ms)
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
                 self.fade_animation.setDuration(350)
                 self.fade_animation.setStartValue(0.0)
@@ -454,7 +449,6 @@ class OverlayWindow(QWidget):
                 self.media_display_label.setPixmap(pixmap)
                 self.container.show()
                 
-                # Fondu d'entrée unique (Fade-in 350ms)
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
                 self.fade_animation.setDuration(350)
                 self.fade_animation.setStartValue(0.0)
@@ -494,7 +488,6 @@ class OverlayWindow(QWidget):
             qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.signals.video_frame_ready.emit(qt_image)
         else:
-            # Stoppe le timer vidéo net pour éviter le retour de la dernière image
             self.video_timer.stop()
 
     def display_frame(self, image):

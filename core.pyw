@@ -396,14 +396,34 @@ class FrameDisplayWidget(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        # Efface d'abord toute l'ancienne frame (notamment quand le ratio change).
-        painter.setCompositionMode(QPainter.CompositionMode_Source)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
-        if not self._image.isNull() and self.width() > 0 and self.height() > 0:
-            target_size = self._image.size().scaled(self.size(), Qt.KeepAspectRatio)
-            x = (self.width() - target_size.width()) // 2
-            y = (self.height() - target_size.height()) // 2
-            target = QRectF(x, y, target_size.width(), target_size.height())
+
+        # Une zone vide doit réellement rester transparente. Cette branche est
+        # utilisée par clear(), pas à chaque frame vidéo.
+        if self._image.isNull() or self.width() <= 0 or self.height() <= 0:
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+            painter.end()
+            return
+
+        target_size = self._image.size().scaled(self.size(), Qt.KeepAspectRatio)
+        x = (self.width() - target_size.width()) // 2
+        y = (self.height() - target_size.height()) // 2
+        target = QRectF(x, y, target_size.width(), target_size.height())
+
+        if self._paint_opacity >= 0.999:
+            # En régime normal, remplacer directement les pixels de l'image.
+            # Ne pas effacer toute la surface transparente puis recomposer
+            # chaque frame : cela peut provoquer des artefacts de composition
+            # sur les fenêtres Qt translucides sous Windows (image visible en
+            # capture mais absente/ fantôme sur l'écran).
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.setOpacity(1.0)
+            painter.drawImage(target, self._image)
+        else:
+            # Pendant le fondu uniquement, on doit repartir d'une surface vide
+            # pour éviter de mélanger plusieurs frames semi-transparentes.
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
             painter.setOpacity(self._paint_opacity)
             painter.drawImage(target, self._image)

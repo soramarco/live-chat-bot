@@ -1,6 +1,7 @@
 import hashlib
 import sys
 import time
+import math
 import requests
 from io import BytesIO
 import tempfile
@@ -144,11 +145,11 @@ class OverlayWindow(QWidget):
         self.is_transitioning = False
         self.current_max_size = 850
         
-        # Timer dédié uniquement pour l'effet de lévitation fluide de l'en-tête (Avatar + Pseudo)
+        # Timer pour l'effet de lévitation fluide uniquement sur l'avatar
         self.float_angle = 0.0
         self.float_timer = QTimer(self)
-        self.float_timer.timeout.connect(self.animate_floating_header)
-        self.float_timer.start(30) # ~33 FPS pour un mouvement fluide, sans impacter la vidéo
+        self.float_timer.timeout.connect(self.animate_floating_avatar)
+        self.float_timer.start(30)
         
         self.init_ui()
         self.init_network()
@@ -176,12 +177,12 @@ class OverlayWindow(QWidget):
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
         
-        # Opacité globale pour le fondu d'entrée unique de tout l'overlay
+        # Opacité pour le fondu d'entrée unique
         self.opacity_effect = QGraphicsOpacityEffect(self.container)
         self.container.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
 
-        # En-tête (Avatar + Pseudo) qui va flotter seul
+        # En-tête (Avatar + Pseudo fixes dans le layout)
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
@@ -204,7 +205,6 @@ class OverlayWindow(QWidget):
         header_layout.addWidget(self.author_label)
         container_layout.addWidget(self.header_widget)
         
-        # Élément média (Image / Vidéo) qui reste totalement fixe
         self.media_display_label = QLabel(self.container)
         self.media_display_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.media_display_label)
@@ -244,11 +244,11 @@ class OverlayWindow(QWidget):
         self.video_timer.timeout.connect(self.update_video_frame)
 
     def animate_floating_header(self):
-        # Fait bouger uniquement l'en-tête (avatar + pseudo) en douceur avec un sinus, sans toucher à la vidéo
+        # Effet flottant appliqué uniquement sur les marges intérieures de l'avatar pour un mouvement organique
         if self.container.isVisible():
-            self.float_angle += 0.07
-            offset_y = int(math.sin(self.float_angle) * 4) # Oscillation de 4 pixels de haut en bas
-            self.header_widget.move(self.header_widget.x(), offset_y)
+            self.float_angle += 0.08
+            offset_y = int(math.sin(self.float_angle) * 3)
+            self.avatar_label.setContentsMargins(0, offset_y, 0, -offset_y)
 
     def on_media_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -494,6 +494,7 @@ class OverlayWindow(QWidget):
             qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.signals.video_frame_ready.emit(qt_image)
         else:
+            # Stoppe le timer vidéo net pour éviter le retour de la dernière image
             self.video_timer.stop()
 
     def display_frame(self, image):

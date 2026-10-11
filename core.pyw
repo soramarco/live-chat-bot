@@ -181,7 +181,6 @@ class OverlayWindow(QWidget):
         self.container.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
 
-        # En-tête regroupant l'Avatar et le Pseudo de façon fixe et solidaire
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
@@ -243,7 +242,6 @@ class OverlayWindow(QWidget):
         self.video_timer.timeout.connect(self.update_video_frame)
 
     def animate_floating_header(self):
-        # Effet flottant fluide appliqué sur l'en-tête entier (Avatar + Pseudo bougent ensemble)
         if self.container.isVisible():
             self.float_angle += 0.08
             offset_y = int(math.sin(self.float_angle) * 3)
@@ -289,8 +287,10 @@ class OverlayWindow(QWidget):
                         time.sleep(1.5)
                         continue
                     
-                    if data.get("status") == "inactive":
-                        print("[NETWORK] Statut inactif reçu, fermeture.")
+                    # Si le statut devient inactif, on ferme l'application proprement
+                    status = data.get("status")
+                    if status == "inactive" or status == False:
+                        print("[NETWORK] Live chat désactivé ou inactif reçu, fermeture immédiate.")
                         self.signals.force_close.emit()
                         break
 
@@ -382,8 +382,11 @@ class OverlayWindow(QWidget):
             else:
                 self.text_label.hide()
 
-            self.author_label.setText(f"{author}")
+            self.author_label.setText(str(author))
+            self.author_label.setVisible(True)
             self.author_label.show()
+            self.header_widget.setVisible(True)
+            self.header_widget.show()
 
             avatar_bytes = data.get("avatar_bytes")
             if avatar_bytes:
@@ -426,6 +429,7 @@ class OverlayWindow(QWidget):
                 else:
                     self.fps = 30
                 
+                self.media_display_label.show()
                 self.container.show()
                 
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
@@ -449,6 +453,7 @@ class OverlayWindow(QWidget):
                     pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     
                 self.media_display_label.setPixmap(pixmap)
+                self.media_display_label.show()
                 self.container.show()
                 
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")

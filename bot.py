@@ -329,7 +329,13 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     global current_active_item, global_queue
+    # Ignore nos propres panneaux/contrôles pour éviter une boucle de repost.
+    if bot.user is not None and message.author.id == bot.user.id:
+        return
+    # Si un autre bot publie dans le salon, remettre aussi notre panneau sous son message.
     if message.author.bot:
+        if is_target_channel(message.channel):
+            await repost_bottom_panel(message.channel, move_to_bottom=True)
         return
 
     if is_target_channel(message.channel):
@@ -344,6 +350,7 @@ async def on_message(message):
 
         if media_url:
             item = {
+                "item_id": str(message.id),
                 "name": message.author.display_name,
                 "avatar": str(message.author.display_avatar.url) if message.author.display_avatar else "",
                 "content": message.content.replace(media_url, "").strip(),
@@ -441,6 +448,7 @@ def get_next_meme():
         game_mode = user_game_modes.get(user, False)
         if current_active_item:
             res_data = {
+                "item_id": str(current_active_item.get("item_id") or getattr(current_active_item.get("message_obj"), "id", current_active_item["url"])),
                 "name": current_active_item["name"],
                 "avatar": current_active_item["avatar"],
                 "content": current_active_item["content"],

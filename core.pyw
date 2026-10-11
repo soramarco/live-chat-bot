@@ -566,9 +566,13 @@ class OverlayWindow(QWidget):
         # En mode jeu, on conserve le rendu compact déjà fonctionnel.
         self.video_label = QLabel(self.container)
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setAutoFillBackground(True)
-        self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.video_label.setStyleSheet("background-color: #000000; border: none;")
+        # IMPORTANT : garder le QLabel vidéo transparent dans TOUS les modes.
+        # Le mode jeu fonctionnait avec ce rendu ; l'opaque paint/background
+        # forcé en mode normal provoquait sous Windows une composition cassée
+        # (frame visible seulement en capture et image fantôme agrandie).
+        self.video_label.setAutoFillBackground(False)
+        self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.video_label.setStyleSheet("background: transparent; border: none;")
         self.video_label.setFixedSize(850, 480)
         container_layout.addWidget(self.video_label, 0, Qt.AlignCenter)
         self.video_label.hide()
@@ -910,11 +914,15 @@ class OverlayWindow(QWidget):
 
         self.current_position = position
         self.current_game_mode = is_game_mode
+        # Le QLabel vidéo doit conserver le même rendu transparent dans les deux
+        # modes. Seules la taille du cadre et la mise en page changent. Basculer
+        # en peinture opaque en mode normal provoquait le défaut observé sous
+        # Windows (média absent à l'œil nu / image fantôme en capture).
+        self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.video_label.setStyleSheet("background: transparent; border: none;")
+        self.video_label.setAutoFillBackground(False)
+
         if is_game_mode:
-            # Ne pas modifier le rendu en mode jeu : il fonctionne déjà chez toi.
-            self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, False)
-            self.video_label.setStyleSheet("background: transparent; border: none;")
-            self.video_label.setAutoFillBackground(False)
             self.current_max_size = 380
             self.set_video_box(380, 215)
             header_font = QFont("Segoe UI", 13, QFont.Bold)
@@ -922,12 +930,8 @@ class OverlayWindow(QWidget):
             self.text_label.setMaximumWidth(380)
             avatar_size = 26
         else:
-            # En mode normal, rendre le widget vidéo réellement opaque et ajuster
-            # sa géométrie au ratio du média : pas de grande zone transparente
-            # autour d'une vidéo portrait, ni de pixmap superposé hors de sa zone.
-            self.video_label.setAutoFillBackground(True)
-            self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, True)
-            self.video_label.setStyleSheet("background-color: #000000; border: none;")
+            # Le cadre garde un fond transparent comme en mode jeu ; sa géométrie
+            # suit toujours le ratio vidéo dans la boîte maximale 850x480.
             self.current_max_size = 850
             self.set_video_box(850, 480)
             header_font = QFont("Segoe UI", 20, QFont.Bold)
@@ -1093,9 +1097,9 @@ class OverlayWindow(QWidget):
                     self.video_label.setFixedSize(target)
                     self.container.adjustSize()
                     self.main_layout.activate()
-                    # Effacer les anciennes limites de l'overlay après changement
-                    # de ratio (notamment paysage -> portrait) avant le dessin.
-                    self.update()
+                    # Ne pas invalider/redessiner toute la fenêtre transparente ici :
+                    # sous Windows cela pouvait effacer la composition de la vidéo
+                    # après le repaint du QLabel. Le widget repeint sa propre zone.
                     log(f"Cadre vidéo normal redimensionné : {old_size.width()}x{old_size.height()} "
                         f"-> {target.width()}x{target.height()}")
                 display_frame = frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)

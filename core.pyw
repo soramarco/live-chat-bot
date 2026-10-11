@@ -50,7 +50,7 @@ _reset_log()
 log("=== Démarrage core.pyw ===")
 
 try:
-    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
     from PyQt5.QtGui import (
         QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
     )
@@ -767,6 +767,10 @@ class OverlayWindow(QWidget):
         count_404 = 0
         fail_url = None
         fail_count = 0
+        # Le cœur est le processus d'affichage, pas le moniteur d'activation.
+        # À l'état inactif il se ferme; live_chat_monitor.pyw reste chargé de
+        # surveiller le serveur et de le relancer lors de la prochaine activation.
+        server_was_inactive = False
 
         while True:
             try:
@@ -774,8 +778,13 @@ class OverlayWindow(QWidget):
 
                 if res.status_code == 404:
                     count_404 += 1
-                    if count_404 >= 3:
-                        self.request_quit("le serveur répond 404 (3 fois de suite)")
+                    if count_404 >= 3 and not server_was_inactive:
+                        log("Serveur HTTP 404 répété : fermeture du cœur local; le moniteur de lancement reste actif")
+                        server_was_inactive = True
+                        with self._network_state_lock:
+                            self._network_active_key = None
+                            self._network_last_done_key = None
+                        self.request_quit("le serveur Live Chat renvoie HTTP 404 à répétition")
                         return
                     time.sleep(1.5)
                     continue
@@ -797,8 +806,19 @@ class OverlayWindow(QWidget):
                     last_logged = summary
 
                 if self._is_inactive(data):
-                    self.request_quit("le serveur dit que le live chat est inactif")
+                    if not server_was_inactive:
+                        log("Live Chat inactif : fermeture complète de core.pyw; le moniteur local relancera le cœur à la prochaine activation")
+                        server_was_inactive = True
+                        with self._network_state_lock:
+                            self._network_active_key = None
+                            self._network_last_done_key = None
+                        self.request_quit("le serveur dit que le Live Chat est inactif")
                     return
+
+                # Le cœur n'est démarré par le moniteur que lorsque le Live Chat
+                # est actif. Si le statut passe à inactif, le cœur quitte; le
+                # moniteur local séparé détectera une future réactivation.
+                server_was_inactive = False
 
                 self.settings_ready.emit({
                     "position": data.get("position", "center"),
@@ -952,6 +972,9 @@ class OverlayWindow(QWidget):
             if self.container.layout() is not None:
                 self.container.layout().activate()
             self.main_layout.activate()
+            # QPoint doit être importé depuis QtCore : sans lui, cette ligne
+            # levait NameError, capturé ci-dessous. La fenêtre vidéo restait donc
+            # à son emplacement initial et la vidéo semblait absente/fantôme.
             top_left = self.video_label.mapToGlobal(QPoint(0, 0))
             rect = QRectF(top_left, self.video_label.size()).toRect()
             if rect.width() > 0 and rect.height() > 0:
@@ -1322,8 +1345,11 @@ class OverlayWindow(QWidget):
             self.video_window.close()
 
 
+
 def main():
-    app = QApplication(sys.argv)
+    auto_monitor = "--auto-monitor" in sys.argv
+    # Passer seulement le nom du script à Qt : --auto-monitor est notre argument privé.
+    app = QApplication([sys.argv[0]])
     app.setQuitOnLastWindowClosed(False)
 
     if not acquire_single_instance():
@@ -1345,9 +1371,9 @@ def main():
     except Exception:
         saved_pseudo = ""
 
-    if os.environ.get("LIVECHAT_AUTO_START") == "1" and saved_pseudo:
+    if (auto_monitor or os.environ.get("LIVECHAT_AUTO_START") == "1") and saved_pseudo:
         pseudo = saved_pseudo
-        log("Démarrage automatique via le launcher de surveillance")
+        log("Démarrage en surveillance automatique avec le pseudo enregistré")
     else:
         setup = SetupDialog()
         setup.exec_()
@@ -1356,6 +1382,8 @@ def main():
             return 0
         pseudo = setup.pseudo
 
+    # L'automatisation est gérée par live_chat_monitor.pyw, séparé du cœur.
+    # Le cœur lui-même doit se fermer lorsque le statut passe à inactif.
     log(f"Pseudo : {pseudo}")
     overlay = OverlayWindow(pseudo)
     overlay.quit_requested.connect(app.quit)

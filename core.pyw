@@ -48,10 +48,10 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-11-native-opaque-video-v1")
+log("CORE_BUILD_ID=2026-10-11-native-opaque-video-v2-rect-import")
 
 try:
-    from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
     from PyQt5.QtGui import (
         QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
     )

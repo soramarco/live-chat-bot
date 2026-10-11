@@ -1,7 +1,6 @@
 import hashlib
 import sys
 import time
-import math
 import requests
 from io import BytesIO
 import tempfile
@@ -11,9 +10,9 @@ import subprocess
 import cv2
 import json
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath, QTransform
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QGraphicsOpacityEffect, QGraphicsProxyWidget
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl, QPropertyAnimation, QEasingCurve, QPoint
+from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QGraphicsOpacityEffect
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/overlay.pyw"
@@ -145,11 +144,11 @@ class OverlayWindow(QWidget):
         self.is_transitioning = False
         self.current_max_size = 850
         
-        # Paramètres pour l'effet flottant subtil de l'en-tête
+        # Timer dédié uniquement pour l'effet de lévitation fluide de l'en-tête (Avatar + Pseudo)
         self.float_angle = 0.0
         self.float_timer = QTimer(self)
         self.float_timer.timeout.connect(self.animate_floating_header)
-        self.float_timer.start(35) # ~30 FPS pour un mouvement fluide et léger
+        self.float_timer.start(30) # ~33 FPS pour un mouvement fluide, sans impacter la vidéo
         
         self.init_ui()
         self.init_network()
@@ -177,11 +176,12 @@ class OverlayWindow(QWidget):
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
         
-        # Effet d'opacité pour le fondu d'entrée unique
+        # Opacité globale pour le fondu d'entrée unique de tout l'overlay
         self.opacity_effect = QGraphicsOpacityEffect(self.container)
         self.container.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
 
+        # En-tête (Avatar + Pseudo) qui va flotter seul
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
@@ -204,6 +204,7 @@ class OverlayWindow(QWidget):
         header_layout.addWidget(self.author_label)
         container_layout.addWidget(self.header_widget)
         
+        # Élément média (Image / Vidéo) qui reste totalement fixe
         self.media_display_label = QLabel(self.container)
         self.media_display_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.media_display_label)
@@ -243,11 +244,11 @@ class OverlayWindow(QWidget):
         self.video_timer.timeout.connect(self.update_video_frame)
 
     def animate_floating_header(self):
-        # Effet de lévitation subtil (amplitude de 3 pixels, mouvement très doux basé sur un sinus)
+        # Fait bouger uniquement l'en-tête (avatar + pseudo) en douceur avec un sinus, sans toucher à la vidéo
         if self.container.isVisible():
-            self.float_angle += 0.06
-            offset_y = int(math.sin(self.float_angle) * 3)
-            self.header_widget.setStyleSheet(f"margin-top: {offset_y}px;")
+            self.float_angle += 0.07
+            offset_y = int(math.sin(self.float_angle) * 4) # Oscillation de 4 pixels de haut en bas
+            self.header_widget.move(self.header_widget.x(), offset_y)
 
     def on_media_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -353,15 +354,15 @@ class OverlayWindow(QWidget):
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
             
-            # Distinction nette : Mode Normal vs Mode Jeu actif
+            # Gestion stricte du format selon le Mode Jeu
             if is_game_mode:
-                self.current_max_size = 380  # Format réduit pour le jeu
+                self.current_max_size = 380
                 self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
                 self.text_label.setMaximumWidth(380)
                 avatar_size = 26
             else:
-                self.current_max_size = 850  # Grand format normal
+                self.current_max_size = 850
                 self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
                 self.text_label.setMaximumWidth(850)
@@ -384,6 +385,7 @@ class OverlayWindow(QWidget):
                 self.text_label.hide()
 
             self.author_label.setText(f"{author}")
+            self.author_label.show()
 
             avatar_bytes = data.get("avatar_bytes")
             if avatar_bytes:

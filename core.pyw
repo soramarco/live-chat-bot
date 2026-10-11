@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-11-core-resident-no-monitor-v4")
+log("CORE_BUILD_ID=2026-10-11-core-low-resource-v5")
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
@@ -275,12 +275,19 @@ class FloatingHeader(QWidget):
         self._text = text
         self._avatar = avatar
         self._font = font
+        # L'animation ne tourne que lorsque l'en-tête contient réellement du contenu.
+        if (self._text or self._avatar) and self.isVisible():
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
         self.updateGeometry()
         self.update()
 
     def clear_content(self):
         self._text = ""
         self._avatar = None
+        self._timer.stop()
         self.updateGeometry()
         self.update()
 
@@ -306,7 +313,8 @@ class FloatingHeader(QWidget):
         return self.sizeHint()
 
     def showEvent(self, event):
-        self._timer.start()
+        if self._text or self._avatar:
+            self._timer.start()
         super().showEvent(event)
 
     def hideEvent(self, event):
@@ -482,9 +490,14 @@ class FrameSurface(QAbstractVideoSurface):
             img = QImage(ptr, clone.width(), clone.height(), clone.bytesPerLine(), self._img_fmt)
             if self.surfaceFormat().scanLineDirection() == QVideoSurfaceFormat.BottomToTop:
                 img = img.mirrored(False, True)
-            # Le widget fait lui-même l'ajustement KeepAspectRatio. On détache les
-            # pixels AVANT de libérer la frame, sans redimensionner dans le buffer.
-            img = img.convertToFormat(QImage.Format_RGB32).copy()
+            # Détacher les pixels AVANT de libérer la frame. Si une conversion
+            # change le format, Qt crée déjà un nouveau buffer; ne pas le recopier.
+            # Si le format est déjà RGB32, une copie explicite reste nécessaire
+            # car l'image source pointe encore sur le buffer mappé de QVideoFrame.
+            if img.format() == QImage.Format_RGB32:
+                img = img.copy()
+            else:
+                img = img.convertToFormat(QImage.Format_RGB32)
         finally:
             clone.unmap()
         self._count += 1
@@ -521,15 +534,22 @@ class OpaqueVideoWindow(QWidget):
         if frame is None or frame.isNull() or geometry.width() <= 0 or geometry.height() <= 0:
             self.clear_frame()
             return
-        self._frame = frame.convertToFormat(QImage.Format_RGB32).copy()
-        # Positionne et redimensionne la fenêtre au rectangle exact du média.
-        if self.geometry() != geometry:
+        # Les frames proviennent déjà de FrameSurface en RGB32 et sont détachées.
+        # QImage utilise le partage implicite : évite une copie mémoire à chaque frame.
+        self._frame = (frame if frame.format() == QImage.Format_RGB32
+                       else frame.convertToFormat(QImage.Format_RGB32).copy())
+        # Ne modifier la fenêtre que si sa géométrie change; ne pas la remonter
+        # au premier plan ni forcer un repaint synchrone à chaque frame vidéo.
+        geometry_changed = self.geometry() != geometry
+        if geometry_changed:
             self.setGeometry(geometry)
         if not self.isVisible():
             self.show()
-        self.raise_()
+            self.raise_()
+        elif geometry_changed:
+            self.raise_()
+        # update() laisse Qt regrouper les frames si le PC est momentanément occupé.
         self.update()
-        self.repaint()
 
     def clear_frame(self):
         self._frame = QImage()
@@ -541,8 +561,12 @@ class OpaqueVideoWindow(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode_Source)
         painter.fillRect(event.rect(), QColor(0, 0, 0, 255))
         if not self._frame.isNull():
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            painter.drawImage(self.rect(), self._frame)
+            if self._frame.size() == self.size():
+                # La frame est déjà à la taille exacte de la fenêtre : pas de redimensionnement.
+                painter.drawImage(0, 0, self._frame)
+            else:
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawImage(self.rect(), self._frame)
         painter.end()
 
 
@@ -996,7 +1020,8 @@ class OverlayWindow(QWidget):
         """Mode jeu : chemin QLabel historique ; mode normal : fenêtre opaque native."""
         if source_frame is None or source_frame.isNull():
             return
-        frame = source_frame.convertToFormat(QImage.Format_RGB32).copy()
+        frame = (source_frame if source_frame.format() == QImage.Format_RGB32
+                 else source_frame.convertToFormat(QImage.Format_RGB32).copy())
         if frame.isNull():
             log("Frame vidéo RGB32 vide; frame ignorée")
             return
@@ -1005,11 +1030,16 @@ class OverlayWindow(QWidget):
         target = frame.size().scaled(box, Qt.KeepAspectRatio)
         if target.isEmpty():
             return
-        display_frame = frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        # Conserver le redimensionnement de haute qualité, mais éviter de le recalculer
+        # quand la frame est déjà à la bonne taille.
+        display_frame = (frame if frame.size() == target else
+                         frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
 
         if self.current_game_mode:
-            # Mode jeu : on garde le chemin QLabel qui fonctionne chez toi.
-            self.video_window.clear_frame()
+            # Mode jeu : garder le chemin QLabel. Ne nettoyer la fenêtre native
+            # que lors du basculement, pas sur chaque frame en mode jeu.
+            if self.video_window.isVisible():
+                self.video_window.clear_frame()
             if not self.video_canvas.isHidden():
                 self.video_canvas.clear()
                 self.video_canvas.hide()
@@ -1020,8 +1050,8 @@ class OverlayWindow(QWidget):
             if self.video_label.isHidden():
                 self.video_label.show()
             self.video_label.setPixmap(pixmap)
-            self.video_label.update()
-            self.video_label.repaint()
+            # setPixmap planifie déjà le repaint; un repaint synchrone bloquerait
+            # la boucle graphique à chaque frame sur les machines modestes.
             return
 
         # Mode normal : ne dessine PAS la vidéo dans un enfant de la fenêtre
@@ -1030,20 +1060,24 @@ class OverlayWindow(QWidget):
         if not self.video_label.isHidden():
             self.video_label.clear()
             self.video_label.hide()
-        if not self.video_canvas.isHidden():
-            self.video_canvas.clear()
+        layout_changed = False
+        # Le canvas est un placeholder vide; ne pas appeler clear()/repaint à chaque frame.
         if self.video_canvas.size() != target:
             old_size = self.video_canvas.size()
-            self.video_canvas.clear()
             self.video_canvas.setFixedSize(target)
+            layout_changed = True
             log(f"Canvas placeholder normal redimensionné : {old_size.width()}x{old_size.height()} "
                 f"-> {target.width()}x{target.height()}")
         if self.video_canvas.isHidden():
             self.video_canvas.show()
-        self.container.adjustSize()
-        if self.container.layout() is not None:
-            self.container.layout().activate()
-        self.main_layout.activate()
+            layout_changed = True
+        # Ces opérations coûteuses ne sont nécessaires qu'au changement de layout,
+        # pas à chaque image décodée (souvent 30 ou 60 fois par seconde).
+        if layout_changed:
+            self.container.adjustSize()
+            if self.container.layout() is not None:
+                self.container.layout().activate()
+            self.main_layout.activate()
 
         top_left = self.video_canvas.mapToGlobal(QPoint(0, 0))
         geometry = QRect(top_left, target)
@@ -1223,13 +1257,15 @@ class OverlayWindow(QWidget):
         if self.current_loaded_url is None or img is None or img.isNull():
             return
         try:
-            # Garder une copie opaque et indépendante de la mémoire QVideoFrame.
-            frame = img.convertToFormat(QImage.Format_RGB32).copy()
+            # FrameSurface émet déjà une QImage RGB32 détachée du buffer vidéo.
+            # On partage cette image implicitement au lieu de la recopier deux fois.
+            frame = (img if img.format() == QImage.Format_RGB32
+                     else img.convertToFormat(QImage.Format_RGB32).copy())
             if frame.isNull():
                 log("Image vidéo reçue mais copie RGB32 impossible")
                 return
             self._last_video_source_size = frame.size()
-            self._last_video_source_frame = frame.copy()
+            self._last_video_source_frame = frame  # copie implicite, sans recopier les pixels
             self._video_frames_received += 1
             self._render_video_frame_for_mode(frame)
             self._video_frames_shown += 1

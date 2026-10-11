@@ -8,7 +8,7 @@ import os
 import threading
 import json
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, QPropertyAnimation
+from PyQt5.QtCore import Qt, QTimer, QUrl
 from PyQt5.QtGui import QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QGraphicsOpacityEffect
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -152,7 +152,7 @@ class OverlayWindow(QWidget):
         self.image_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.image_label)
 
-        # Widget vidéo natif PyQtMultimedia avec fond opaque pour forcer le rendu de l'image sous Windows
+        # Widget vidéo natif PyQtMultimedia avec fond opaque pour forcer le rendu sous Windows
         self.video_widget = QVideoWidget(self.container)
         self.video_widget.setFixedSize(850, 480)
         self.video_widget.setStyleSheet("background: black; border-radius: 8px;")

@@ -54,10 +54,11 @@ try:
     from PyQt5.QtWidgets import (
         QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
         QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox,
-        QGraphicsView, QGraphicsScene,
     )
-    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-    from PyQt5.QtMultimediaWidgets import QGraphicsVideoItem
+    from PyQt5.QtMultimedia import (
+        QMediaPlayer, QMediaContent, QAbstractVideoSurface, QAbstractVideoBuffer,
+        QVideoFrame, QVideoSurfaceFormat,
+    )
 except Exception:
     log("IMPOSSIBLE D'IMPORTER PyQt5 :\n" + traceback.format_exc())
     sys.exit(1)
@@ -165,6 +166,61 @@ def create_discord_avatar_with_ring(pixmap, size=40):
     return result
 
 
+
+# ---------------------------------------------------------------------------
+# AFFICHAGE VIDEO IMAGE PAR IMAGE
+# QGraphicsVideoItem / QVideoWidget ne s'affichent pas dans une fenêtre
+# transparente (on entendait le son mais on ne voyait rien). On récupère donc
+# chaque image de la vidéo et on la dessine dans un simple QLabel.
+# ---------------------------------------------------------------------------
+class FrameSurface(QAbstractVideoSurface):
+    frame_ready = pyqtSignal(QImage)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.target_size = (850, 480)
+        self._img_fmt = QImage.Format_Invalid
+
+    def supportedPixelFormats(self, handle_type=QAbstractVideoBuffer.NoHandle):
+        if handle_type == QAbstractVideoBuffer.NoHandle:
+            return [
+                QVideoFrame.Format_RGB32,
+                QVideoFrame.Format_ARGB32,
+                QVideoFrame.Format_ARGB32_Premultiplied,
+                QVideoFrame.Format_RGB24,
+                QVideoFrame.Format_RGB565,
+                QVideoFrame.Format_RGB555,
+            ]
+        return []
+
+    def start(self, fmt):
+        img_fmt = QVideoFrame.imageFormatFromPixelFormat(fmt.pixelFormat())
+        if img_fmt == QImage.Format_Invalid or fmt.frameSize().isEmpty():
+            log(f"Format vidéo non géré : {fmt.pixelFormat()}")
+            return False
+        self._img_fmt = img_fmt
+        log(f"Surface vidéo démarrée : {fmt.frameSize().width()}x{fmt.frameSize().height()}")
+        return super().start(fmt)
+
+    def present(self, frame):
+        if not frame.isValid():
+            return False
+        clone = QVideoFrame(frame)
+        if not clone.map(QAbstractVideoBuffer.ReadOnly):
+            return False
+        try:
+            ptr = clone.bits()
+            ptr.setsize(clone.mappedBytes())
+            img = QImage(ptr, clone.width(), clone.height(), clone.bytesPerLine(), self._img_fmt)
+            if self.surfaceFormat().scanLineDirection() == QVideoSurfaceFormat.BottomToTop:
+                img = img.mirrored(False, True)
+            w, h = self.target_size
+            img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # copie indépendante
+        finally:
+            clone.unmap()
+        self.frame_ready.emit(img)
+        return True
+
 # ---------------------------------------------------------------------------
 # OVERLAY
 # ---------------------------------------------------------------------------
@@ -237,24 +293,17 @@ class OverlayWindow(QWidget):
         self.image_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.image_label)
 
-        self.graphics_view = QGraphicsView(self.container)
-        self.graphics_view.setFixedSize(850, 480)
-        self.graphics_view.setStyleSheet("background: transparent; border: none;")
-        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.video_label = QLabel(self.container)
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setFixedSize(850, 480)
+        container_layout.addWidget(self.video_label)
+        self.video_label.hide()
 
-        self.scene = QGraphicsScene(self.graphics_view)
-        self.graphics_view.setScene(self.scene)
-
-        self.video_item = QGraphicsVideoItem()
-        self.scene.addItem(self.video_item)
-        self.video_item.setSize(QRectF(0, 0, 850, 480).size())
-
-        container_layout.addWidget(self.graphics_view)
-        self.graphics_view.hide()
+        self.video_surface = FrameSurface(self)
+        self.video_surface.frame_ready.connect(self.on_video_frame)
 
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-        self.media_player.setVideoOutput(self.video_item)
+        self.media_player.setVideoOutput(self.video_surface)
         # IMPORTANT : EndOfMedia est un "mediaStatus", pas un "state".
         # L'ancien code utilisait stateChanged -> la fin de vidéo n'était jamais détectée.
         self.media_player.mediaStatusChanged.connect(self.on_media_status)
@@ -287,7 +336,7 @@ class OverlayWindow(QWidget):
         self.author_label.clear()
         self.avatar_label.hide()
         self.image_label.hide()
-        self.graphics_view.hide()
+        self.video_label.hide()
         self.text_label.setText(text)
         self.text_label.show()
         self.container.show()
@@ -443,16 +492,14 @@ class OverlayWindow(QWidget):
 
             if is_game_mode:
                 self.current_max_size = 380
-                self.graphics_view.setFixedSize(380, 215)
-                self.video_item.setSize(QRectF(0, 0, 380, 215).size())
+                self.set_video_box(380, 215)
                 self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
                 self.text_label.setMaximumWidth(380)
                 avatar_size = 26
             else:
                 self.current_max_size = 850
-                self.graphics_view.setFixedSize(850, 480)
-                self.video_item.setSize(QRectF(0, 0, 850, 480).size())
+                self.set_video_box(850, 480)
                 self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
                 self.text_label.setMaximumWidth(850)
@@ -494,7 +541,8 @@ class OverlayWindow(QWidget):
 
             if is_vid:
                 self.image_label.hide()
-                self.graphics_view.show()
+                self.video_label.clear()
+                self.video_label.show()
                 self._cleanup_video_file()
 
                 suffix = ".mp4"
@@ -517,7 +565,7 @@ class OverlayWindow(QWidget):
                 # filet de sécurité : si la vidéo ne se termine jamais, on la coupe après 5 min
                 self.close_timer.start(300000)
             else:
-                self.graphics_view.hide()
+                self.video_label.hide()
                 self.image_label.show()
 
                 image = QImage.fromData(content)
@@ -532,6 +580,14 @@ class OverlayWindow(QWidget):
         except Exception:
             log("Erreur dans handle_new_media :\n" + traceback.format_exc())
             self.finish_media_playback()
+
+    def set_video_box(self, w, h):
+        self.video_label.setFixedSize(w, h)
+        self.video_surface.target_size = (w, h)
+
+    def on_video_frame(self, img):
+        if self.current_loaded_url is not None:
+            self.video_label.setPixmap(QPixmap.fromImage(img))
 
     def on_media_status(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -575,7 +631,7 @@ class OverlayWindow(QWidget):
         self.close_timer.stop()
         self.media_player.stop()
         self.image_label.clear()
-        self.graphics_view.hide()
+        self.video_label.hide()
         self.image_label.hide()
         self.author_label.clear()
         self.avatar_label.clear()

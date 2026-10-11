@@ -50,7 +50,7 @@ _reset_log()
 log("=== Démarrage core.pyw ===")
 
 try:
-    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, QPointF, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
     from PyQt5.QtGui import (
         QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
     )
@@ -251,6 +251,7 @@ class FloatingHeader(QWidget):
         self._avatar = None
         self._text = ""
         self._font = QFont("Segoe UI", 20, QFont.Bold)
+        self._paint_opacity = 1.0
         self._t0 = time.monotonic()
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.PreciseTimer)
@@ -258,6 +259,15 @@ class FloatingHeader(QWidget):
         self._timer.timeout.connect(self.update)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def getPaintOpacity(self):
+        return self._paint_opacity
+
+    def setPaintOpacity(self, value):
+        self._paint_opacity = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    paintOpacity = pyqtProperty(float, fget=getPaintOpacity, fset=setPaintOpacity)
 
     def set_content(self, text, avatar, font):
         self._text = text
@@ -307,6 +317,7 @@ class FloatingHeader(QWidget):
         p = QPainter(self)
         p.setRenderHints(
             QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        p.setOpacity(self._paint_opacity)
         offset = math.sin((time.monotonic() - self._t0) * self.SPEED) * self.AMP
         fm = QFontMetrics(self._font)
         cy = self.height() / 2.0 + offset
@@ -333,6 +344,71 @@ class FloatingHeader(QWidget):
             p.drawPath(path)
             p.fillPath(path, QBrush(QColor(255, 255, 255)))
         p.end()
+
+# ---------------------------------------------------------------------------
+# SURFACE D'AFFICHAGE PEINTE DIRECTEMENT (images et frames vidéo)
+# ---------------------------------------------------------------------------
+class FrameDisplayWidget(QWidget):
+    """Affiche l'image courante par QPainter, sans cache pixmap de QLabel."""
+    def __init__(self, parent=None, fixed_box=False):
+        super().__init__(parent)
+        self._image = QImage()
+        self._paint_opacity = 1.0
+        self._fixed_box = fixed_box
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def getPaintOpacity(self):
+        return self._paint_opacity
+
+    def setPaintOpacity(self, value):
+        self._paint_opacity = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    paintOpacity = pyqtProperty(float, fget=getPaintOpacity, fset=setPaintOpacity)
+
+    def setPixmap(self, pixmap):
+        if pixmap is None or pixmap.isNull():
+            self.clear()
+            return
+        self._image = pixmap.toImage().copy()
+        if not self._fixed_box:
+            self.setFixedSize(pixmap.size())
+        self.updateGeometry()
+        self.update()
+        self.repaint()
+
+    def setImage(self, image):
+        if image is None or image.isNull():
+            self.clear()
+            return
+        # Toujours posséder une copie indépendante des buffers vidéo/Qt.
+        self._image = image.copy()
+        self.update()
+        self.repaint()
+
+    def clear(self):
+        self._image = QImage()
+        self.update()
+        self.repaint()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        # Efface d'abord toute l'ancienne frame (notamment quand le ratio change).
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        if not self._image.isNull() and self.width() > 0 and self.height() > 0:
+            target_size = self._image.size().scaled(self.size(), Qt.KeepAspectRatio)
+            x = (self.width() - target_size.width()) // 2
+            y = (self.height() - target_size.height()) // 2
+            target = QRectF(x, y, target_size.width(), target_size.height())
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            painter.setOpacity(self._paint_opacity)
+            painter.drawImage(target, self._image)
+        painter.end()
+
 
 # ---------------------------------------------------------------------------
 # AFFICHAGE VIDEO IMAGE PAR IMAGE
@@ -380,12 +456,8 @@ class FrameSurface(QAbstractVideoSurface):
             img = QImage(ptr, clone.width(), clone.height(), clone.bytesPerLine(), self._img_fmt)
             if self.surfaceFormat().scanLineDirection() == QVideoSurfaceFormat.BottomToTop:
                 img = img.mirrored(False, True)
-            w, h = self.target_size
-            img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            # IMPORTANT : QImage peut encore partager la mémoire de QVideoFrame.
-            # Après clone.unmap(), le buffer est libéré/réutilisé par Qt : cela
-            # provoquait des traînées et des images fantômes superposées en mode jeu.
-            # copy() détache réellement les pixels AVANT de libérer la frame.
+            # Le widget fait lui-même l'ajustement KeepAspectRatio. On détache les
+            # pixels AVANT de libérer la frame, sans redimensionner dans le buffer.
             img = img.convertToFormat(QImage.Format_RGB32).copy()
         finally:
             clone.unmap()
@@ -415,7 +487,7 @@ class OverlayWindow(QWidget):
         self.is_clearing = False
         self.current_max_size = 850
         self._video_frames_shown = 0
-        self._fade_animation = None
+        self._fade_animations = []
         self.current_position = None
         self.current_game_mode = None
         self.current_author = ""
@@ -442,15 +514,9 @@ class OverlayWindow(QWidget):
         self.main_layout.setContentsMargins(40, 0, 40, 0)
 
         self.container = QWidget(self)
-        # Le fondu est appliqué à la fenêtre native, pas au conteneur qui reçoit
-        # les images vidéo. Un effet graphique sur les frames animées peut
-        # laisser des images fantômes sous Windows avec un fond translucide.
-        self._fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_animation.setDuration(280)
-        self._fade_animation.setStartValue(0.0)
-        self._fade_animation.setEndValue(1.0)
-        self._fade_animation.setEasingCurve(QEasingCurve.OutCubic)
-        self.setWindowOpacity(1.0)
+        # On évite setWindowOpacity sur la fenêtre plein écran transparente :
+        # l'opacité globale peut perturber la composition graphique de Windows.
+        # Le fondu d'entrée est peint localement par FloatingHeader/FrameDisplayWidget.
         container_layout = QVBoxLayout(self.container)
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
@@ -458,14 +524,12 @@ class OverlayWindow(QWidget):
         self.header = FloatingHeader(self.container)
         container_layout.addWidget(self.header)
 
-        self.image_label = QLabel(self.container)
-        self.image_label.setAlignment(Qt.AlignCenter)
-        container_layout.addWidget(self.image_label)
+        self.image_label = FrameDisplayWidget(self.container, fixed_box=False)
+        container_layout.addWidget(self.image_label, 0, Qt.AlignCenter)
 
-        self.video_label = QLabel(self.container)
-        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label = FrameDisplayWidget(self.container, fixed_box=True)
         self.video_label.setFixedSize(850, 480)
-        container_layout.addWidget(self.video_label)
+        container_layout.addWidget(self.video_label, 0, Qt.AlignCenter)
         self.video_label.hide()
 
         self.video_surface = FrameSurface(self)
@@ -499,17 +563,35 @@ class OverlayWindow(QWidget):
         self.close_timer.timeout.connect(self.finish_media_playback)
 
     def show_with_fade(self):
-        """Affiche pseudo/avatar/média avec un fondu entrant, sans fondu sortant."""
-        if self._fade_animation is not None:
-            self._fade_animation.stop()
-        self.setWindowOpacity(0.0)
+        """Fondu local des widgets, sans animer l'opacité de la fenêtre Windows."""
+        for animation in self._fade_animations:
+            animation.stop()
+            animation.deleteLater()
+        self._fade_animations = []
+
+        targets = [self.header]
+        # isVisible() reste False tant que le parent container est masqué.
+        # isHidden() permet de tester l'état propre du widget avant de montrer le parent.
+        if not self.video_label.isHidden():
+            targets.append(self.video_label)
+        elif not self.image_label.isHidden():
+            targets.append(self.image_label)
+
+        for widget in targets:
+            widget.setPaintOpacity(0.0)
+
         self.container.show()
         self.container.raise_()
         self.raise_()
-        if self._fade_animation is not None:
-            self._fade_animation.setStartValue(0.0)
-            self._fade_animation.setEndValue(1.0)
-            self._fade_animation.start()
+
+        for widget in targets:
+            animation = QPropertyAnimation(widget, b"paintOpacity", self)
+            animation.setDuration(280)
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+            animation.setEasingCurve(QEasingCurve.OutCubic)
+            animation.start()
+            self._fade_animations.append(animation)
 
     def show_notice(self, text, ms=4000):
         self.header.clear_content()
@@ -844,17 +926,17 @@ class OverlayWindow(QWidget):
         # buffer vidéo et déjà adaptée à la zone vidéo. On ne la rescale pas une
         # deuxième fois : éviter une copie inutile limite aussi les soucis de
         # rafraîchissement du QLabel sur les fenêtres transparentes Windows.
-        pixmap = QPixmap.fromImage(img.copy())
-        if pixmap.isNull():
-            log("Image vidéo reçue mais conversion en QPixmap impossible")
+        frame = img.convertToFormat(QImage.Format_RGB32).copy()
+        if frame.isNull():
+            log("Image vidéo reçue mais copie QImage impossible")
             return
         if not self.video_label.isVisible():
             self.video_label.show()
-        self.video_label.setPixmap(pixmap)
-        self.video_label.update()
+        self.video_label.setImage(frame)
         self._video_frames_shown += 1
         if self._video_frames_shown == 1:
-            log(f"Première image réellement envoyée au QLabel : {pixmap.width()}x{pixmap.height()}")
+            log(f"Première image peinte par FrameDisplayWidget : {frame.width()}x{frame.height()}, "
+                f"zone {self.video_label.width()}x{self.video_label.height()}")
 
     def on_media_status(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -895,11 +977,15 @@ class OverlayWindow(QWidget):
             self.video_path = None
 
     def hide_overlay_ui(self):
-        # Aucun fondu sortant : on masque immédiatement et on restaure l'opacité
-        # de la fenêtre avant le prochain média.
-        if self._fade_animation is not None:
-            self._fade_animation.stop()
-        self.setWindowOpacity(1.0)
+        # Aucun fondu sortant : masquer immédiatement. La fenêtre elle-même reste
+        # toujours à opacité 1 pour éviter les problèmes de composition de Windows.
+        for animation in self._fade_animations:
+            animation.stop()
+            animation.deleteLater()
+        self._fade_animations = []
+        self.header.setPaintOpacity(1.0)
+        self.image_label.setPaintOpacity(1.0)
+        self.video_label.setPaintOpacity(1.0)
         self.close_timer.stop()
         self.media_player.stop()
         self.image_label.clear()

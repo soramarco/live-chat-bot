@@ -1,6 +1,7 @@
 import hashlib
 import sys
 import time
+import math
 import requests
 from io import BytesIO
 import tempfile
@@ -10,9 +11,9 @@ import subprocess
 import cv2
 import json
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QGraphicsOpacityEffect
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/overlay.pyw"
@@ -144,6 +145,12 @@ class OverlayWindow(QWidget):
         self.is_transitioning = False
         self.current_max_size = 850
         
+        # Variables pour l'animation de lévitation (effet gravitationnel)
+        self.float_angle = 0.0
+        self.float_timer = QTimer(self)
+        self.float_timer.timeout.connect(self.update_floating_animation)
+        self.float_timer.start(30) # Rafraîchissement fluide à ~33 FPS
+        
         self.init_ui()
         self.init_network()
 
@@ -170,6 +177,11 @@ class OverlayWindow(QWidget):
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
         
+        # Effet d'opacité pour le fondu d'entrée uniquement
+        self.opacity_effect = QGraphicsOpacityEffect(self.container)
+        self.container.setGraphicsEffect(self.opacity_effect)
+        self.opacity_effect.setOpacity(1.0)
+
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
@@ -229,6 +241,13 @@ class OverlayWindow(QWidget):
 
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self.update_video_frame)
+
+    def update_floating_animation(self):
+        # Crée un mouvement gravitationnel/flottant subtil en modifiant légèrement la position Y du header
+        if self.container.isVisible():
+            self.float_angle += 0.08
+            offset_y = int(math.sin(self.float_angle) * 4) # Amplitude de 4 pixels de haut en bas
+            self.header_widget.move(self.header_widget.x(), offset_y)
 
     def on_media_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -334,7 +353,6 @@ class OverlayWindow(QWidget):
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
             
-            # Ajustement dynamique des dimensions en fonction du Mode Jeu
             if is_game_mode:
                 self.current_max_size = 450
                 self.author_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
@@ -408,6 +426,15 @@ class OverlayWindow(QWidget):
                     self.fps = 30
                 
                 self.container.show()
+                
+                # Animation de fondu d'entrée uniquement (Fade-in de 400ms)
+                self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+                self.fade_animation.setDuration(400)
+                self.fade_animation.setStartValue(0.0)
+                self.fade_animation.setEndValue(1.0)
+                self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)
+                self.fade_animation.start()
+
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
                 self.media_player.setVolume(100)
                 self.media_player.play()
@@ -423,6 +450,15 @@ class OverlayWindow(QWidget):
                     
                 self.media_display_label.setPixmap(pixmap)
                 self.container.show()
+                
+                # Animation de fondu d'entrée uniquement (Fade-in de 400ms)
+                self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+                self.fade_animation.setDuration(400)
+                self.fade_animation.setStartValue(0.0)
+                self.fade_animation.setEndValue(1.0)
+                self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)
+                self.fade_animation.start()
+
                 self.close_timer.start(7000)
         except Exception as e:
             print(f"[UI] Erreur dans handle_new_media : {e}")

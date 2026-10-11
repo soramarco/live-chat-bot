@@ -1,38 +1,101 @@
 import sys
+import os
 import time
 import math
-import requests
+import json
 import tempfile
-import os
 import threading
+import traceback
+import io
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF
-from PyQt5.QtGui import QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QGraphicsOpacityEffect, QMessageBox, QGraphicsView, QGraphicsScene
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-from PyQt5.QtMultimediaWidgets import QGraphicsVideoItem
+import requests
 
-# Support optionnel de Pillow pour les images AVIF/WebP complexes
-try:
-    from PIL import Image as PilImage
-    HAS_PILLOW = True
-except ImportError:
-    HAS_PILLOW = False
-
-CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
-LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.lock")
-SERVER_URL = "https://live-chat-bot-ctus.onrender.com/get_next_meme"
-POP_URL = "https://live-chat-bot-ctus.onrender.com/pop_meme"
+# ---------------------------------------------------------------------------
+# JOURNAL DE DEBUG : C:\Users\<toi>\overlay_debug.log
+# ---------------------------------------------------------------------------
 LOG_FILE = os.path.join(os.path.expanduser("~"), "overlay_debug.log")
+_log_lock = threading.Lock()
 
-def log_debug(msg):
+def log(msg):
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
-    except:
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%H:%M:%S ") + str(msg) + "\n")
+    except Exception:
         pass
 
-class SetupDialog(QWidget):
+def _reset_log():
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 300000:
+            os.remove(LOG_FILE)
+    except Exception:
+        pass
+
+def _excepthook(exc_type, exc_value, exc_tb):
+    log("CRASH :\n" + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+
+sys.excepthook = _excepthook
+try:
+    threading.excepthook = lambda a: _excepthook(a.exc_type, a.exc_value, a.exc_traceback)
+except Exception:
+    pass
+
+_reset_log()
+log("=== Démarrage core.pyw ===")
+
+try:
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, QPointF, QSize, pyqtSignal
+    from PyQt5.QtGui import (
+        QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
+    )
+    from PyQt5.QtWidgets import (
+        QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
+        QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox,
+    )
+    from PyQt5.QtMultimedia import (
+        QMediaPlayer, QMediaContent, QAbstractVideoSurface, QAbstractVideoBuffer,
+        QVideoFrame, QVideoSurfaceFormat,
+    )
+except Exception:
+    log("IMPOSSIBLE D'IMPORTER PyQt5 :\n" + traceback.format_exc())
+    sys.exit(1)
+
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
+OLD_LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.lock")
+BASE_URL = "https://live-chat-bot-ctus.onrender.com"
+SERVER_URL = BASE_URL + "/get_next_meme"
+POP_URL = BASE_URL + "/pop_meme"
+
+VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
+
+class UnsupportedMedia(Exception):
+    pass
+
+# ---------------------------------------------------------------------------
+# UNE SEULE INSTANCE (mutex Windows)
+# ---------------------------------------------------------------------------
+_mutex_handle = None
+
+def acquire_single_instance():
+    global _mutex_handle
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        _mutex_handle = kernel32.CreateMutexW(None, False, "Local\\LiveChatOverlayMemeMutex")
+        already_running = ctypes.get_last_error() == 183
+        return not already_running
+    except Exception:
+        log("Mutex impossible : " + traceback.format_exc())
+        return True
+
+# ---------------------------------------------------------------------------
+# FENETRE DE CONFIGURATION DU PSEUDO
+# ---------------------------------------------------------------------------
+class SetupDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.pseudo = None
@@ -44,13 +107,13 @@ class SetupDialog(QWidget):
         self.setStyleSheet("background-color: #2b2d31; color: white; font-family: 'Segoe UI';")
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
-        
+
         saved_pseudo = ""
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     saved_pseudo = f.read().strip()
-            except:
+            except Exception:
                 pass
 
         label = QLabel("Entre ton pseudo Discord exact :", self)
@@ -59,11 +122,16 @@ class SetupDialog(QWidget):
 
         self.input_field = QLineEdit(self)
         self.input_field.setText(saved_pseudo)
-        self.input_field.setStyleSheet("padding: 8px; font-size: 14px; background: #1e1f22; border: 1px solid #383a40; border-radius: 4px; color: white;")
+        self.input_field.setStyleSheet(
+            "padding: 8px; font-size: 14px; background: #1e1f22; border: 1px solid #383a40; "
+            "border-radius: 4px; color: white;")
+        self.input_field.returnPressed.connect(self.validate)
         layout.addWidget(self.input_field)
 
         btn = QPushButton("Lancer l'Overlay", self)
-        btn.setStyleSheet("margin-top: 10px; padding: 8px; font-size: 14px; background: #5865F2; color: white; border: none; border-radius: 4px; font-weight: bold;")
+        btn.setStyleSheet(
+            "margin-top: 10px; padding: 8px; font-size: 14px; background: #5865F2; color: white; "
+            "border: none; border-radius: 4px; font-weight: bold;")
         btn.clicked.connect(self.validate)
         layout.addWidget(btn)
 
@@ -74,9 +142,9 @@ class SetupDialog(QWidget):
             try:
                 with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                     f.write(text)
-            except:
+            except Exception:
                 pass
-            self.hide()
+            self.accept()
 
 def create_discord_avatar_with_ring(pixmap, size=40):
     total_size = size + 8
@@ -95,120 +163,234 @@ def create_discord_avatar_with_ring(pixmap, size=40):
     painter.end()
     return result
 
+# ---------------------------------------------------------------------------
+# EN-TETE FLOTTANT (Avatar + Pseudo centrés proprement)
+# ---------------------------------------------------------------------------
+class FloatingHeader(QWidget):
+    PAD = 6
+    GAP = 10
+    AMP = 4.0
+    SPEED = 2.4
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._avatar = None
+        self._text = ""
+        self._font = QFont("Segoe UI", 20, QFont.Bold)
+        self._t0 = time.monotonic()
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self.update)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def set_content(self, text, avatar, font):
+        self._text = text
+        self._avatar = avatar
+        self._font = font
+        self.updateGeometry()
+        self.update()
+
+    def clear_content(self):
+        self._text = ""
+        self._avatar = None
+        self.updateGeometry()
+        self.update()
+
+    def _text_width(self, fm):
+        try:
+            return fm.horizontalAdvance(self._text)
+        except AttributeError:
+            return fm.width(self._text)
+
+    def sizeHint(self):
+        if not self._text and not self._avatar:
+            return QSize(0, 0)
+        fm = QFontMetrics(self._font)
+        text_w = self._text_width(fm) if self._text else 0
+        av_w = self._avatar.width() if self._avatar else 0
+        av_h = self._avatar.height() if self._avatar else 0
+        gap = self.GAP if (self._avatar and self._text) else 0
+        w = av_w + gap + text_w + 2 * self.PAD + 6
+        h = int(max(av_h, fm.height()) + 2 * self.PAD + 2 * self.AMP)
+        return QSize(w, h)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def showEvent(self, event):
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        if not self._text and not self._avatar:
+            return
+        p = QPainter(self)
+        p.setRenderHints(
+            QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        offset = math.sin((time.monotonic() - self._t0) * self.SPEED) * self.AMP
+        fm = QFontMetrics(self._font)
+        
+        # Calcul de la largeur totale du contenu pour le centrer parfaitement dans son propre widget
+        av_w = self._avatar.width() if self._avatar else 0
+        text_w = self._text_width(fm) if self._text else 0
+        gap = self.GAP if (self._avatar and self._text) else 0
+        total_content_width = av_w + gap + text_w
+        
+        start_x = (self.width() - total_content_width) / 2.0
+        cy = self.height() / 2.0 + offset
+        
+        x = start_x
+        if self._avatar:
+            p.drawPixmap(QPointF(x, cy - self._avatar.height() / 2.0), self._avatar)
+            x += self._avatar.width() + self.GAP
+        if self._text:
+            baseline = cy - fm.height() / 2.0 + fm.ascent()
+            path = QPainterPath()
+            path.addText(QPointF(x, baseline), self._font, self._text)
+            p.setPen(QPen(QColor(0, 0, 0, 220), 3.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+            p.fillPath(path, QBrush(QColor(255, 255, 255)))
+        p.end()
+
+# ---------------------------------------------------------------------------
+# SURFACE VIDEO FRAME PAR FRAME
+# ---------------------------------------------------------------------------
+class FrameSurface(QAbstractVideoSurface):
+    frame_ready = pyqtSignal(QImage)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.target_size = (850, 480)
+        self._img_fmt = QImage.Format_Invalid
+        self._count = 0
+
+    def supportedPixelFormats(self, handle_type=QAbstractVideoBuffer.NoHandle):
+        if handle_type == QAbstractVideoBuffer.NoHandle:
+            return [
+                QVideoFrame.Format_RGB32,
+                QVideoFrame.Format_ARGB32,
+                QVideoFrame.Format_ARGB32_Premultiplied,
+                QVideoFrame.Format_RGB24,
+                QVideoFrame.Format_RGB565,
+                QVideoFrame.Format_RGB555,
+            ]
+        return []
+
+    def start(self, fmt):
+        img_fmt = QVideoFrame.imageFormatFromPixelFormat(fmt.pixelFormat())
+        if img_fmt == QImage.Format_Invalid or fmt.frameSize().isEmpty():
+            log(f"Format vidéo non géré : {fmt.pixelFormat()}")
+            return False
+        self._img_fmt = img_fmt
+        self._count = 0
+        log(f"Surface vidéo démarrée : {fmt.frameSize().width()}x{fmt.frameSize().height()}")
+        return super().start(fmt)
+
+    def present(self, frame):
+        if not frame.isValid():
+            return False
+        clone = QVideoFrame(frame)
+        if not clone.map(QAbstractVideoBuffer.ReadOnly):
+            return False
+        try:
+            ptr = clone.bits()
+            ptr.setsize(clone.mappedBytes())
+            img = QImage(ptr, clone.width(), clone.height(), clone.bytesPerLine(), self._img_fmt)
+            if self.surfaceFormat().scanLineDirection() == QVideoSurfaceFormat.BottomToTop:
+                img = img.mirrored(False, True)
+            w, h = self.target_size
+            img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img = img.convertToFormat(QImage.Format_RGB32)
+        finally:
+            clone.unmap()
+        self._count += 1
+        if self._count in (1, 2, 10, 60, 300):
+            px = img.pixel(img.width() // 2, img.height() // 2)
+            log(f"Image vidéo n°{self._count} : {img.width()}x{img.height()}, "
+                f"format source {self._img_fmt}, pixel central {px & 0xFFFFFFFF:08X}")
+        self.frame_ready.emit(img)
+        return True
+
+# ---------------------------------------------------------------------------
+# OVERLAY PRINCIPAL
+# ---------------------------------------------------------------------------
 class OverlayWindow(QWidget):
+    media_ready = pyqtSignal(dict)
+    hide_requested = pyqtSignal()
+    quit_requested = pyqtSignal()
+
     def __init__(self, discord_pseudo):
         super().__init__()
         self.discord_pseudo = discord_pseudo
-        self.video_file = None
+        self.video_path = None
         self.current_loaded_url = None
-        self.is_transitioning = False
+        self.last_done_url = None
         self.is_clearing = False
         self.current_max_size = 850
-        
-        # Paramètres d'animation ultra-fluide (Sub-pixel, ~60 FPS)
-        self.float_angle = 0.0
-        self.float_speed = 0.05
-        self.float_amp = 4.0
-        self.float_timer = QTimer(self)
-        self.float_timer.timeout.connect(self.animate_floating_header)
-        self.float_timer.start(16)
-        
+
+        self.media_ready.connect(self.handle_new_media)
+        self.hide_requested.connect(self.hide_overlay_ui)
+
         self.init_ui()
         self.init_network()
 
     def init_ui(self):
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.resize(1920, 1080)
-        log_debug(f"Taille de l'overlay : 1920x1080")
-        self.move(0, 0)
-
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style | 0x80000 | 0x20 | 0x8)
-        except Exception as e:
-            log_debug(f"Erreur style Windows layer : {e}")
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+        log(f"Taille de l'overlay : {screen.width()}x{screen.height()}")
 
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(40, 0, 40, 0)
-        
-        self.container = QWidget(self)
-        self.container_layout = QVBoxLayout(self.container)
-        self.container_layout.setAlignment(Qt.AlignCenter)
-        self.container_layout.setSpacing(12)
-        
-        self.opacity_effect = QGraphicsOpacityEffect(self.container)
-        self.container.setGraphicsEffect(self.opacity_effect)
-        self.opacity_effect.setOpacity(1.0)
 
-        # En-tête centré (Avatar + Pseudo)
-        self.header_widget = QWidget(self.container)
-        header_layout = QHBoxLayout(self.header_widget)
-        header_layout.setAlignment(Qt.AlignCenter)
-        header_layout.setSpacing(10)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.avatar_label = QLabel(self.header_widget)
-        header_layout.addWidget(self.avatar_label)
-        
-        self.author_label = QLabel(self.header_widget)
-        self.author_label.setAlignment(Qt.AlignCenter)
-        self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
-        self.author_label.setStyleSheet("color: white;")
-        
-        shadow_pseudo = QGraphicsDropShadowEffect()
-        shadow_pseudo.setBlurRadius(3)
-        shadow_pseudo.setColor(QColor(0, 0, 0, 255))
-        shadow_pseudo.setOffset(1, 1)
-        self.author_label.setGraphicsEffect(shadow_pseudo)
-        header_layout.addWidget(self.author_label)
-        
-        self.container_layout.addWidget(self.header_widget, alignment=Qt.AlignCenter)
-        
-        # Élément image
+        self.container = QWidget(self)
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setAlignment(Qt.AlignCenter)
+        container_layout.setSpacing(12)
+
+        # En-tête centré au-dessus du média
+        self.header = FloatingHeader(self.container)
+        container_layout.addWidget(self.header, alignment=Qt.AlignCenter)
+
         self.image_label = QLabel(self.container)
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.container_layout.addWidget(self.image_label, alignment=Qt.AlignCenter)
+        container_layout.addWidget(self.image_label, alignment=Qt.AlignCenter)
 
-        # Élément vidéo
-        self.graphics_view = QGraphicsView(self.container)
-        self.graphics_view.setFixedSize(850, 480)
-        self.graphics_view.setStyleSheet("background: transparent; border: none;")
-        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
-        self.scene = QGraphicsScene(self.graphics_view)
-        self.graphics_view.setScene(self.scene)
-        
-        self.video_item = QGraphicsVideoItem()
-        self.scene.addItem(self.video_item)
-        self.video_item.setSize(QRectF(0, 0, 850, 480).size())
+        self.video_label = QLabel(self.container)
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setFixedSize(850, 480)
+        container_layout.addWidget(self.video_label, alignment=Qt.AlignCenter)
+        self.video_label.hide()
 
-        self.container_layout.addWidget(self.graphics_view, alignment=Qt.AlignCenter)
-        self.graphics_view.hide()
+        self.video_surface = FrameSurface(self)
+        self.video_surface.frame_ready.connect(self.on_video_frame)
 
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-        self.media_player.setVideoOutput(self.video_item)
-        self.media_player.stateChanged.connect(self.media_state_changed)
+        self.media_player.setVideoOutput(self.video_surface)
+        self.media_player.mediaStatusChanged.connect(self.on_media_status)
+        self.media_player.error.connect(self.on_media_error)
 
-        # Texte du mème/message
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setWordWrap(True)
         self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
         self.text_label.setStyleSheet("color: white;")
         self.text_label.setMaximumWidth(850)
-        
         shadow_text = QGraphicsDropShadowEffect()
         shadow_text.setBlurRadius(3)
         shadow_text.setColor(QColor(0, 0, 0, 255))
         shadow_text.setOffset(1, 1)
         self.text_label.setGraphicsEffect(shadow_text)
-        self.container_layout.addWidget(self.text_label, alignment=Qt.AlignCenter)
-        
+        container_layout.addWidget(self.text_label, alignment=Qt.AlignCenter)
+
         self.main_layout.addStretch(1)
         self.main_layout.addWidget(self.container)
         self.main_layout.addStretch(1)
@@ -218,18 +400,24 @@ class OverlayWindow(QWidget):
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
 
-    def animate_floating_header(self):
-        if self.container.isVisible():
-            self.float_angle += self.float_speed
-            offset_y = int(round(math.sin(self.float_angle) * self.float_amp))
-            self.header_widget.setContentsMargins(0, offset_y, 0, -offset_y)
+    def show_notice(self, text, ms=4000):
+        self.header.clear_content()
+        self.image_label.hide()
+        self.video_label.hide()
+        self.text_label.setText(text)
+        self.text_label.show()
+        self.container.show()
+        self.raise_()
+        QTimer.singleShot(ms, self._end_notice)
+
+    def _end_notice(self):
+        if self.current_loaded_url is None:
+            self.text_label.clear()
+            self.container.hide()
 
     def update_alignment(self, position):
         while self.main_layout.count():
-            item = self.main_layout.takeAt(0)
-            if item.widget() and item.widget() != self.container:
-                item.widget().deleteLater()
-            
+            self.main_layout.takeAt(0)
         if position == "left":
             self.main_layout.addWidget(self.container)
             self.main_layout.addStretch(1)
@@ -245,88 +433,174 @@ class OverlayWindow(QWidget):
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
 
+    @staticmethod
+    def _is_inactive(data):
+        status = data.get("status")
+        if isinstance(status, str) and status.lower() in ("inactive", "off", "disabled", "stopped"):
+            return True
+        if status is False or data.get("active") is False:
+            return True
+        return False
+
+    def _make_displayable_image(self, session, url, content):
+        if not QImage.fromData(content).isNull():
+            return content
+        try:
+            from PIL import Image
+            im = Image.open(io.BytesIO(content)).convert("RGBA")
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            png = buf.getvalue()
+            if not QImage.fromData(png).isNull():
+                log("Image convertie avec Pillow")
+                return png
+        except Exception as e:
+            log(f"Conversion Pillow impossible : {e}")
+
+        try:
+            parts = urlparse(url)
+            if parts.netloc in ("cdn.discordapp.com", "media.discordapp.net"):
+                query = dict(parse_qsl(parts.query))
+                query["format"] = "png"
+                new_url = urlunparse(parts._replace(netloc="media.discordapp.net", query=urlencode(query)))
+                r = session.get(new_url, timeout=15)
+                if r.status_code == 200 and not QImage.fromData(r.content).isNull():
+                    log("Image convertie via le proxy Discord")
+                    return r.content
+        except Exception as e:
+            log(f"Conversion via proxy impossible : {e}")
+        return None
+
+    def request_quit(self, reason):
+        log("Fermeture demandée : " + reason)
+        self.quit_requested.emit()
+        threading.Timer(5, lambda: os._exit(0)).start()
+
     def network_worker(self):
+        session = requests.Session()
+        last_logged = None
+        last_err = None
+        count_404 = 0
+        fail_url = None
+        fail_count = 0
+
         while True:
             try:
-                url_query = f"{SERVER_URL}?user={requests.utils.quote(self.discord_pseudo)}"
-                res = requests.get(url_query, timeout=3)
-                log_debug(f"Réponse serveur : {res.text}")
-                
-                if res.status_code == 200:
-                    data = res.json()
-                    status = data.get("status")
-                    if status == "inactive" or status == False or data.get("active") == False:
-                        log_debug("Fermeture demandée : le serveur dit que le live chat est inactif")
-                        if os.path.exists(LOCK_FILE):
-                            try:
-                                os.remove(LOCK_FILE)
-                            except:
-                                pass
-                        log_debug("=== Arrêt propre ===")
-                        os._exit(0)
+                res = session.get(SERVER_URL, params={"user": self.discord_pseudo}, timeout=10)
 
-                    new_url = data.get("url")
-                    if not new_url:
-                        if self.current_loaded_url is not None:
-                            self.current_loaded_url = None
-                            QTimer.singleShot(0, self.hide_overlay_ui)
-                        time.sleep(1.5)
-                        continue
-
-                    elif new_url != self.current_loaded_url and not self.is_transitioning:
-                        self.is_transitioning = True
-                        self.current_loaded_url = new_url
-                        
-                        media_res = requests.get(new_url, timeout=15)
-                        if media_res.status_code == 200:
-                            content_type = media_res.headers.get("content-type", "")
-                            data["content_bytes"] = media_res.content
-                            log_debug(f"Média téléchargé ({len(media_res.content)} octets, {content_type})")
-                            
-                            avatar_url = data.get("avatar", "")
-                            if avatar_url:
-                                try:
-                                    ar = requests.get(avatar_url, timeout=3)
-                                    if ar.status_code == 200:
-                                        data["avatar_bytes"] = ar.content
-                                except:
-                                    pass
-                            QTimer.singleShot(0, lambda d=data: self.handle_new_media(d))
-                        else:
-                            self.is_transitioning = False
-                    else:
-                        time.sleep(1.5)
-                elif res.status_code == 404:
-                    if os.path.exists(LOCK_FILE):
-                        try:
-                            os.remove(LOCK_FILE)
-                        except:
-                            pass
-                    os._exit(0)
-                else:
+                if res.status_code == 404:
+                    count_404 += 1
+                    if count_404 >= 3:
+                        self.request_quit("le serveur répond 404 (3 fois de suite)")
+                        return
                     time.sleep(1.5)
+                    continue
+                count_404 = 0
+
+                if res.status_code != 200:
+                    msg = f"HTTP {res.status_code} du serveur"
+                    if msg != last_err:
+                        log(msg)
+                        last_err = msg
+                    time.sleep(2)
+                    continue
+                last_err = None
+
+                data = res.json()
+                summary = json.dumps(data, ensure_ascii=False)[:300]
+                if summary != last_logged:
+                    log("Réponse serveur : " + summary)
+                    last_logged = summary
+
+                if self._is_inactive(data):
+                    self.request_quit("le serveur dit que le live chat est inactif")
+                    return
+
+                new_url = data.get("url")
+                if not new_url:
+                    self.last_done_url = None
+                    if self.current_loaded_url is not None:
+                        self.current_loaded_url = None
+                        self.hide_requested.emit()
+                    time.sleep(1.5)
+                    continue
+
+                if new_url == self.last_done_url or new_url == self.current_loaded_url:
+                    time.sleep(1.5)
+                    continue
+
+                self.current_loaded_url = new_url
+                try:
+                    media_res = session.get(new_url, timeout=20)
+                    if media_res.status_code != 200:
+                        raise RuntimeError(f"téléchargement du média : HTTP {media_res.status_code}")
+                    data["content_bytes"] = media_res.content
+                    data["content_type"] = media_res.headers.get("Content-Type", "")
+                    log(f"Média téléchargé ({len(media_res.content)} octets, {data['content_type']})")
+
+                    url_path = urlparse(new_url).path.lower()
+                    is_video = data["content_type"].lower().startswith("video/") or url_path.endswith(VIDEO_EXTS)
+                    if not is_video:
+                        displayable = self._make_displayable_image(session, new_url, media_res.content)
+                        if displayable is None:
+                            raise UnsupportedMedia("format d'image non supporté (" + data["content_type"] + ")")
+                        data["content_bytes"] = displayable
+
+                    avatar_url = data.get("avatar", "")
+                    if avatar_url:
+                        try:
+                            ar = session.get(avatar_url, timeout=5)
+                            if ar.status_code == 200:
+                                data["avatar_bytes"] = ar.content
+                        except Exception:
+                            pass
+                    fail_url, fail_count = None, 0
+                    self.media_ready.emit(data)
+                except UnsupportedMedia as e:
+                    log(f"Média ignoré : {e}")
+                    self.last_done_url = new_url
+                    self.current_loaded_url = None
+                    self._send_pop_request()
+                    fail_url, fail_count = None, 0
+                except Exception as e:
+                    log(f"Échec média : {e}")
+                    self.current_loaded_url = None
+                    if fail_url == new_url:
+                        fail_count += 1
+                    else:
+                        fail_url, fail_count = new_url, 1
+                    if fail_count >= 3:
+                        log("Média abandonné après 3 échecs, on le passe")
+                        self.last_done_url = new_url
+                        self._send_pop_request()
+                        fail_url, fail_count = None, 0
+                    time.sleep(2)
+
             except Exception as e:
+                msg = f"Erreur réseau : {e}"
+                if msg != last_err:
+                    log(msg)
+                    last_err = msg
                 time.sleep(2)
 
     def handle_new_media(self, data):
         try:
+            self.is_clearing = False
             self.media_player.stop()
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
-            
+
             if is_game_mode:
                 self.current_max_size = 380
-                self.graphics_view.setFixedSize(380, 215)
-                self.video_item.setSize(QRectF(0, 0, 380, 215).size())
-                self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+                self.set_video_box(380, 215)
+                header_font = QFont("Segoe UI", 13, QFont.Bold)
                 self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
                 self.text_label.setMaximumWidth(380)
                 avatar_size = 26
             else:
                 self.current_max_size = 850
-                self.graphics_view.setFixedSize(850, 480)
-                self.video_item.setSize(QRectF(0, 0, 850, 480).size())
-                self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
+                self.set_video_box(850, 480)
+                header_font = QFont("Segoe UI", 20, QFont.Bold)
                 self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
                 self.text_label.setMaximumWidth(850)
                 avatar_size = 40
@@ -340,197 +614,161 @@ class OverlayWindow(QWidget):
 
             author = data.get("name", "")
             meme_txt = data.get("content", "")
-            
+
             if meme_txt:
                 self.text_label.setText(meme_txt)
                 self.text_label.show()
             else:
                 self.text_label.hide()
 
-            self.author_label.setText(str(author))
-            self.author_label.show()
-
+            avatar_pix = None
             avatar_bytes = data.get("avatar_bytes")
             if avatar_bytes:
                 img = QImage.fromData(avatar_bytes)
                 pix = QPixmap.fromImage(img)
-                self.avatar_label.setPixmap(create_discord_avatar_with_ring(pix, size=avatar_size))
-                self.avatar_label.show()
-            else:
-                self.avatar_label.clear()
-                self.avatar_label.hide()
+                if not pix.isNull():
+                    avatar_pix = create_discord_avatar_with_ring(pix, size=avatar_size)
+            self.header.set_content(str(author), avatar_pix, header_font)
 
             content = data.get("content_bytes")
-            is_vid = any(ext in url.lower() for ext in [".mp4", ".mov", ".webm", ".avi"])
+            path = urlparse(url).path.lower()
+            ctype = (data.get("content_type") or "").lower()
+            is_vid = ctype.startswith("video/") or path.endswith(VIDEO_EXTS)
 
             if is_vid:
                 self.image_label.hide()
-                self.graphics_view.show()
-
-                if self.video_file and os.path.exists(self.video_file.name):
-                    try:
-                        self.video_file.close()
-                        os.remove(self.video_file.name)
-                    except:
-                        pass
+                self.video_label.clear()
+                self.video_label.show()
+                self._cleanup_video_file()
 
                 suffix = ".mp4"
-                for ext in [".webm", ".mov", ".avi", ".mp4"]:
-                    if ext in url.lower():
+                for ext in VIDEO_EXTS:
+                    if path.endswith(ext):
                         suffix = ext
                         break
 
-                self.video_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                self.video_file.write(content)
-                self.video_file.flush()
-                self.video_file.close()
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                tmp.write(content)
+                tmp.flush()
+                tmp.close()
+                self.video_path = tmp.name
+                log(f"Lecture vidéo : {self.video_path}")
 
-                log_debug(f"Lecture vidéo : {self.video_file.name}")
-                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
+                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_path)))
                 self.container.show()
                 self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
-                self.close_timer.stop()
+                self.close_timer.start(300000)
             else:
-                self.graphics_view.hide()
+                self.video_label.hide()
                 self.image_label.show()
 
                 image = QImage.fromData(content)
-                if image.isNull() and HAS_PILLOW:
-                    try:
-                        import io
-                        pil_img = PilImage.open(io.BytesIO(content))
-                        pil_img = pil_img.convert("RGBA")
-                        data_bytes = pil_img.tobytes("raw", "RGBA")
-                        image = QImage(data_bytes, pil_img.width, pil_img.height, QImage.Format_RGBA8888)
-                        log_debug("Image convertie avec Pillow")
-                    except Exception as ex:
-                        log_debug(f"Erreur conversion Pillow : {ex}")
-
-                if image.isNull():
-                    log_debug("Média ignoré : format d'image non supporté par Qt")
-                    self.hide_overlay_ui()
-                    return
-
                 pixmap = QPixmap.fromImage(image)
                 if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
-                    pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                
+                    pixmap = pixmap.scaled(self.current_max_size, self.current_max_size,
+                                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.image_label.setPixmap(pixmap)
                 self.container.show()
                 self.raise_()
                 self.close_timer.start(7000)
-        except Exception as e:
-            log_debug(f"Erreur handle_new_media : {e}")
-            self.hide_overlay_ui()
-        finally:
-            self.is_transitioning = False
-
-    def media_state_changed(self, state):
-        if state == QMediaPlayer.EndOfMedia:
-            log_debug("Fin de la vidéo")
+        except Exception:
+            log("Erreur dans handle_new_media :\n" + traceback.format_exc())
             self.finish_media_playback()
 
+    def set_video_box(self, w, h):
+        self.video_label.setFixedSize(w, h)
+        self.video_surface.target_size = (w, h)
+
+    def on_video_frame(self, img):
+        if self.current_loaded_url is not None:
+            self.video_label.setPixmap(QPixmap.fromImage(img))
+
+    def on_media_status(self, status):
+        if status == QMediaPlayer.EndOfMedia:
+            log("Fin de la vidéo")
+            self.finish_media_playback()
+        elif status == QMediaPlayer.InvalidMedia:
+            log("Vidéo invalide : codec manquant sur ce PC ?")
+            QTimer.singleShot(1500, self.finish_media_playback)
+
+    def on_media_error(self, err):
+        log(f"Erreur du lecteur vidéo : {err} - {self.media_player.errorString()}")
+        QTimer.singleShot(1500, self.finish_media_playback)
+
     def finish_media_playback(self):
-        if self.is_clearing:
+        if self.is_clearing or self.current_loaded_url is None:
             return
         self.is_clearing = True
+        self.close_timer.stop()
+        self.last_done_url = self.current_loaded_url
         threading.Thread(target=self._send_pop_request, daemon=True).start()
         self.hide_overlay_ui()
 
     def _send_pop_request(self):
         try:
-            requests.post(f"{POP_URL}?user={requests.utils.quote(self.discord_pseudo)}", timeout=3)
-        except:
-            pass
+            requests.post(POP_URL, params={"user": self.discord_pseudo}, timeout=5)
+        except Exception as e:
+            log(f"Erreur pop_meme : {e}")
+
+    def _cleanup_video_file(self):
+        if self.video_path:
+            try:
+                self.media_player.stop()
+                self.media_player.setMedia(QMediaContent())
+                if os.path.exists(self.video_path):
+                    os.remove(self.video_path)
+            except Exception:
+                pass
+            self.video_path = None
 
     def hide_overlay_ui(self):
+        self.close_timer.stop()
         self.media_player.stop()
         self.image_label.clear()
-        self.graphics_view.hide()
+        self.video_label.hide()
         self.image_label.hide()
-        self.author_label.clear()
-        self.avatar_label.clear()
+        self.header.clear_content()
         self.text_label.clear()
         self.container.hide()
-        
-        if self.video_file and os.path.exists(self.video_file.name):
-            try:
-                self.video_file.close()
-                os.remove(self.video_file.name)
-            except:
-                pass
-            self.video_file = None
-
+        self._cleanup_video_file()
         self.current_loaded_url = None
-        QTimer.singleShot(500, lambda: setattr(self, 'is_transitioning', False))
         self.is_clearing = False
+
+    def cleanup(self):
+        self._cleanup_video_file()
 
 def main():
     app = QApplication(sys.argv)
-    
-    if os.path.exists(LOCK_FILE):
-        try:
-            if time.time() - os.path.getmtime(LOCK_FILE) > 10:
-                os.remove(LOCK_FILE)
-        except:
-            pass
+    app.setQuitOnLastWindowClosed(False)
 
-    if os.path.exists(LOCK_FILE):
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("Live Chat déjà actif")
-        msg.setText("Le live chat est déjà actif sur le PC !")
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
-        sys.exit(0)
-        
-    lock_fd = None
+    if not acquire_single_instance():
+        log("Une autre instance tourne déjà")
+        QMessageBox.warning(None, "Live Chat déjà actif", "Le live chat est déjà actif sur le PC !")
+        return 0
+
     try:
-        lock_fd = open(LOCK_FILE, "w")
-        lock_fd.write("locked")
-        lock_fd.flush()
-    except:
+        if os.path.exists(OLD_LOCK_FILE):
+            os.remove(OLD_LOCK_FILE)
+    except Exception:
         pass
 
     setup = SetupDialog()
-    setup.show()
-    app.exec_()
-    
+    setup.exec_()
     if not setup.pseudo:
-        if lock_fd:
-            try:
-                lock_fd.close()
-            except:
-                pass
-        if os.path.exists(LOCK_FILE):
-            try:
-                os.remove(LOCK_FILE)
-            except:
-                pass
-        sys.exit(0)
+        log("Configuration fermée sans pseudo")
+        return 0
 
-    log_debug(f"=== Démarrage core.pyw ===")
-    log_debug(f"Pseudo : {setup.pseudo}")
-
+    log(f"Pseudo : {setup.pseudo}")
     overlay = OverlayWindow(setup.pseudo)
+    overlay.quit_requested.connect(app.quit)
     overlay.show()
-    
-    exit_code = app.exec_()
-    
-    if lock_fd:
-        try:
-            lock_fd.close()
-        except:
-            pass
-    if os.path.exists(LOCK_FILE):
-        try:
-            os.remove(LOCK_FILE)
-        except:
-            pass
-            
-    log_debug("=== Arrêt propre ===")
-    sys.exit(exit_code)
+    overlay.show_notice("Overlay connecté ✅", 4000)
+
+    code = app.exec_()
+    overlay.cleanup()
+    log("=== Arrêt propre ===")
+    return code
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

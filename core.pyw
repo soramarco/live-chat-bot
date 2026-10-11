@@ -1,414 +1,587 @@
-import os
-import asyncio
-import threading
-import json
+import hashlib
+import sys
 import time
-from threading import Thread
-import discord
-from discord.ext import commands
-from flask import Flask, jsonify, request
+import math
+import requests
+from io import BytesIO
+import tempfile
+import os
+import threading
+import subprocess
+import cv2
+import json
 
-app = Flask(__name__)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QGraphicsOpacityEffect
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
-STORAGE_FILE = "bot_storage.json"
-TARGET_CHANNEL_ID = 1544497366814560318  # ID de ton salon Discord sous forme d'entier brut
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/overlay.pyw"
 
-global_queue = []
-current_active_item = None
-active_users = set()
-user_positions = {}
-user_game_modes = {}
-data_lock = threading.Lock()
-last_pop_time = 0
-
-main_panel_message = None
-
-def load_data():
-    global user_positions, active_users, user_game_modes
-    if os.path.exists(STORAGE_FILE):
-        try:
-            with open(STORAGE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                user_positions = data.get("user_positions", {})
-                active_users = set(data.get("active_users", []))
-                user_game_modes = data.get("user_game_modes", {})
-                print(f"[DATA] Données chargées : {len(user_positions)} utilisateur(s), {len(active_users)} actif(s).")
-        except Exception as e:
-            print(f"[ERREUR] Chargement stockage : {e}")
-
-def save_data():
+def check_for_updates():
     try:
-        data = {
-            "user_positions": user_positions,
-            "active_users": list(active_users),
-            "user_game_modes": user_game_modes
-        }
-        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"[ERREUR] Sauvegarde stockage : {e}")
-
-load_data()
-
-@app.route('/')
-def home():
-    return "Bot is alive!", 200
-
-def get_main_panel_content():
-    with data_lock:
-        count = len(active_users)
-        if count == 0:
-            users_str = "_Personne_"
-        else:
-            users_str = ", ".join(f"**{u}**" for u in active_users)
-    return (
-        "🎛️ **Panneau de contrôle du Live Chat**\n"
-        f"📊 **Statut en direct** : {count} actif(s)\n"
-        f"👤 **Connectés** : {users_str}\n\n"
-        "Clique sur le bouton ci-dessous pour gérer ton affichage et ta position :"
-    )
-
-async def refresh_or_repost_panel(channel):
-    global main_panel_message
-    view = MainPanelView()
-    content = get_main_panel_content()
-    
-    try:
-        if main_panel_message:
-            try:
-                await main_panel_message.delete()
-            except Exception:
-                pass
-            main_panel_message = None
-
-        async for message in channel.history(limit=25):
-            if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-                    
-        main_panel_message = await channel.send(content, view=view)
-    except Exception as e:
-        print(f"Erreur rafraîchissement panneau : {e}")
-
-class PersonalControlView(discord.ui.View):
-    def __init__(self, is_active, username):
-        super().__init__(timeout=180)
-        self.is_active = is_active
-        self.username = username
-        self.update_button_styles()
-
-    def update_button_styles(self):
-        if self.is_active:
-            self.toggle_btn.label = "Désactiver mon Live Chat"
-            self.toggle_btn.style = discord.ButtonStyle.danger
-            self.toggle_btn.emoji = "🔴"
-        else:
-            self.toggle_btn.label = "Activer mon Live Chat"
-            self.toggle_btn.style = discord.ButtonStyle.success
-            self.toggle_btn.emoji = "🟢"
-
-        is_gm = user_game_modes.get(self.username, False)
-        if is_gm:
-            self.btn_game_mode.label = "Mode Jeu : ACTIF"
-            self.btn_game_mode.style = discord.ButtonStyle.success
-            self.btn_game_mode.emoji = "🎮"
-        else:
-            self.btn_game_mode.label = "Mode Jeu : INACTIF"
-            self.btn_game_mode.style = discord.ButtonStyle.secondary
-            self.btn_game_mode.emoji = "🎮"
-
-        pos = user_positions.get(self.username, "center")
-        self.btn_left.style = discord.ButtonStyle.primary if pos == "left" else discord.ButtonStyle.secondary
-        self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
-        self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
-
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0)
-    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        response = requests.get(GITHUB_RAW_URL, timeout=3)
+        if response.status_code == 200:
+            remote_code = response.content
+            current_file_path = os.path.abspath(__file__)
             
-        with data_lock:
-            if self.username in active_users:
-                active_users.remove(self.username)
-                self.is_active = False
-            else:
-                active_users.add(self.username)
-                self.is_active = True
-            save_data()
-        
-        self.update_button_styles()
-        await self.update_response(interaction)
-
-        if main_panel_message:
-            asyncio.create_task(refresh_or_repost_panel(main_panel_message.channel))
-
-    @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        with data_lock:
-            current_gm = user_game_modes.get(self.username, False)
-            user_game_modes[self.username] = not current_gm
-            save_data()
-        self.update_button_styles()
-        await self.update_response(interaction)
-
-    @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
-    async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        with data_lock:
-            user_positions[self.username] = "left"
-            save_data()
-        self.update_button_styles()
-        await self.update_response(interaction)
-
-    @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1)
-    async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        with data_lock:
-            user_positions[self.username] = "center"
-            save_data()
-        self.update_button_styles()
-        await self.update_response(interaction)
-
-    @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
-    async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        with data_lock:
-            user_positions[self.username] = "right"
-            save_data()
-        self.update_button_styles()
-        await self.update_response(interaction)
-
-    async def update_response(self, interaction):
-        current_pos = user_positions.get(self.username, 'center').upper()
-        gm_status = "OUI" if user_game_modes.get(self.username, False) else "NON"
-        status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**" 
-            if self.is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
-        )
-        try:
-            await interaction.edit_original_response(content=status_text, view=self)
-        except Exception as e:
-            print(f"Erreur mise à jour position/mode jeu : {e}")
-
-class MainPanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v77")
-    async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=True)
-        except Exception:
-            pass
-            
-        username = interaction.user.display_name
-        with data_lock:
-            is_active = username in active_users
-            current_pos = user_positions.get(username, "center").upper()
-            gm_status = "OUI" if user_game_modes.get(username, False) else "NON"
-        
-        status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**" 
-            if is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
-        )
-        view = PersonalControlView(is_active, username)
-        try:
-            await interaction.followup.send(content=status_text, view=view, ephemeral=True)
-        except Exception as e:
-            print(f"Erreur d'affichage du panneau : {e}")
-
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-def is_target_channel(channel):
-    return channel.id == TARGET_CHANNEL_ID
-
-@bot.event
-async def on_ready():
-    global main_panel_message
-    print(f"[DISCORD] Connexion réussie en tant que {bot.user}")
-
-    bot.add_view(MainPanelView())
-    
-    channel = bot.get_channel(TARGET_CHANNEL_ID)
-    if channel:
-        await refresh_or_repost_panel(channel)
-    else:
-        print("[AVERTISSEMENT] Le salon cible est introuvable avec cet ID !")
-
-@bot.event
-async def on_message(message):
-    global current_active_item, global_queue
-    
-    if message.author.bot:
-        return
-        
-    if is_target_channel(message.channel):
-        media_url = ""
-        if message.attachments:
-            media_url = message.attachments[0].url
-        elif "http" in message.content:
-            words = message.content.split()
-            for w in words:
-                if w.startswith("http"):
-                    media_url = w
-                    break
-                    
-        if media_url:
-            item = {
-                "name": message.author.display_name,
-                "avatar": str(message.author.avatar.url) if message.author.avatar else "",
-                "content": message.content.replace(media_url, "").strip(),
-                "url": media_url,
-                "message_obj": message,
-                "control_message": None
-            }
-            
-            with data_lock:
-                if len(global_queue) > 15:
-                    global_queue.pop(0)
-
-                if current_active_item is None:
-                    current_active_item = item
-                    is_first = True
-                else:
-                    global_queue.append(item)
-                    is_first = False
-
-            bot.loop.create_task(send_control_message(item, is_active=is_first))
-
-        await asyncio.sleep(0.3)
-        await refresh_or_repost_panel(message.channel)
-
-    await bot.process_commands(message)
-
-class ItemStopView(discord.ui.View):
-    def __init__(self, item_ref, active):
-        super().__init__(timeout=86400)
-        self.item_ref = item_ref
-        self.stop_button.disabled = not active
-
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(thinking=True)
-            
-        global current_active_item, global_queue, last_pop_time
-        with data_lock:
-            now = time.time()
-            if now - last_pop_time < 1.5:
-                return
-            last_pop_time = now
-
-            if current_active_item == self.item_ref:
-                try:
-                    if self.item_ref.get("control_message"):
-                        await self.item_ref["control_message"].delete()
-                except Exception:
-                    pass
+            with open(current_file_path, "rb") as f:
+                local_code = f.read()
                 
-                if global_queue:
-                    current_active_item = global_queue.pop(0)
-                    asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
-                else:
-                    current_active_item = None
-
-async def send_control_message(item, is_active):
-    try:
-        view = ItemStopView(item, is_active)
-        status_text = "🎬 **Média en cours de diffusion...**" if is_active else "⏳ **En attente dans la file...**"
-        msg = await item["message_obj"].reply(status_text, view=view)
-        item["control_message"] = msg
+            if hashlib.md5(remote_code).digest() != hashlib.md5(local_code).digest():
+                print("[INFO] Une mise à jour est disponible. Téléchargement...")
+                temp_update_path = "overlay_new.pyw"
+                with open(temp_update_path, "wb") as f:
+                    f.write(remote_code)
+                
+                batch_content = """
+@echo off
+timeout /t 2 /nobreak > nul
+move /y overlay_new.pyw overlay.pyw
+start pythonw.exe overlay.pyw
+del "%~f0"
+"""
+                with open("update.bat", "w") as b:
+                    b.write(batch_content)
+                
+                print("[INFO] Mise à jour prête. Redémarrage...")
+                subprocess.Popen("update.bat", shell=True)
+                sys.exit(0)
     except Exception as e:
-        print(f"Erreur critique en envoyant le message de contrôle : {e}")
+        print(f"[AVERTISSEMENT] Impossible de vérifier les mises à jour : {e}")
 
-async def activate_next_item_message(item):
-    try:
-        if item.get("control_message"):
-            view = ItemStopView(item, active=True)
-            await item["control_message"].edit(content="🎬 **Média en cours de diffusion...**", view=view)
-    except Exception as e:
-        print(f"Erreur activation prochain message : {e}")
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
+SERVER_URL = "https://live-chat-bot-ctus.onrender.com/get_next_meme"
+POP_URL = "https://live-chat-bot-ctus.onrender.com/pop_meme"
 
-@app.route('/get_next_meme', methods=['GET'])
-def get_next_meme():
-    global current_active_item, global_queue
-    user = request.args.get("user", "").strip()
-    
-    if not user:
-        return jsonify({"url": None, "status": "inactive"})
+class SetupDialog(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.pseudo = None
+        self.init_ui()
 
-    with data_lock:
-        if user not in active_users:
-            return jsonify({"url": None, "status": "inactive"})
-
-        position = user_positions.get(user, "center")
-        game_mode = user_game_modes.get(user, False)
-
-        if current_active_item:
-            res_data = {
-                "name": current_active_item["name"],
-                "avatar": current_active_item["avatar"],
-                "content": current_active_item["content"],
-                "url": current_active_item["url"],
-                "position": position,
-                "game_mode": game_mode,
-                "status": "active"
-            }
-        else:
-            res_data = {"url": None, "position": position, "game_mode": game_mode, "status": "active"}
-
-    return jsonify(res_data)
-
-@app.route('/pop_meme', methods=['POST'])
-def pop_meme():
-    global current_active_item, global_queue, last_pop_time
-    user = request.args.get("user", "").strip()
-    
-    with data_lock:
-        now = time.time()
-        if now - last_pop_time < 1.5:
-            name = current_active_item["name"] if current_active_item else None
-            return jsonify({"status": "ignored", "next": name})
+    def init_ui(self):
+        self.setWindowTitle("Configuration de l'Overlay Mème")
+        self.setFixedSize(350, 180)
+        self.setStyleSheet("background-color: #2b2d31; color: white; font-family: 'Segoe UI';")
         
-        last_pop_time = now
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        
+        saved_pseudo = ""
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    saved_pseudo = f.read().strip()
+            except:
+                pass
 
-        if current_active_item:
-            if current_active_item.get("control_message"):
-                asyncio.run_coroutine_threadsafe(safe_delete_msg(current_active_item["control_message"]), bot.loop)
+        label = QLabel("Entre ton pseudo Discord exact :", self)
+        label.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 5px;")
+        layout.addWidget(label)
+
+        self.input_field = QLineEdit(self)
+        self.input_field.setText(saved_pseudo)
+        self.input_field.setStyleSheet("padding: 8px; font-size: 14px; background: #1e1f22; border: 1px solid #383a40; border-radius: 4px; color: white;")
+        layout.addWidget(self.input_field)
+
+        btn = QPushButton("Lancer l'Overlay", self)
+        btn.setStyleSheet("margin-top: 10px; padding: 8px; font-size: 14px; background: #5865F2; color: white; border: none; border-radius: 4px; font-weight: bold;")
+        btn.clicked.connect(self.validate)
+        layout.addWidget(btn)
+
+    def validate(self):
+        text = self.input_field.text().strip()
+        if text:
+            self.pseudo = text
+            try:
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except:
+                pass
+            self.hide()
+
+def create_discord_avatar_with_ring(pixmap, size=40):
+    total_size = size + 8
+    
+    result = QPixmap(total_size, total_size)
+    result.fill(Qt.transparent)
+    
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    
+    painter.setBrush(QBrush(QColor(87, 242, 135)))
+    painter.setPen(Qt.NoPen)
+    painter.drawEllipse(0, 0, total_size, total_size)
+    
+    avatar_scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    
+    path = QPainterPath()
+    path.addEllipse(4, 4, size, size)
+    painter.setClipPath(path)
+    
+    painter.drawPixmap(4, 4, avatar_scaled)
+    painter.end()
+    
+    return result
+
+class WorkerSignals(QObject):
+    update_media = pyqtSignal(dict)
+    video_frame_ready = pyqtSignal(QImage)
+    force_close = pyqtSignal()
+
+class OverlayWindow(QWidget):
+    def __init__(self, discord_pseudo):
+        super().__init__()
+        self.discord_pseudo = discord_pseudo
+        self.media_player = None
+        self.video_file = None
+        self.video_capture = None
+        self.fps = 30
+        self.video_timer = QTimer(self)
+        self.is_clearing = False
+        self.media_in_progress = False
+        self.current_loaded_url = None
+        self.is_transitioning = False
+        self.current_max_size = 850
+        
+        self.float_angle = 0.0
+        self.float_timer = QTimer(self)
+        self.float_timer.timeout.connect(self.animate_floating_header)
+        self.float_timer.start(30)
+        
+        self.init_ui()
+        self.init_network()
+
+    def init_ui(self):
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.resize(1920, 1080)
+        self.move(0, 0)
+
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
+            ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style | 0x80000 | 0x20 | 0x8)
+        except Exception as e:
+            print(f"Erreur style Windows layer : {e}")
+
+        self.main_layout = QHBoxLayout(self)
+        self.main_layout.setContentsMargins(40, 0, 40, 0)
+        
+        self.container = QWidget(self)
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setAlignment(Qt.AlignCenter)
+        container_layout.setSpacing(12)
+        
+        self.opacity_effect = QGraphicsOpacityEffect(self.container)
+        self.container.setGraphicsEffect(self.opacity_effect)
+        self.opacity_effect.setOpacity(1.0)
+
+        self.header_widget = QWidget(self.container)
+        header_layout = QHBoxLayout(self.header_widget)
+        header_layout.setAlignment(Qt.AlignCenter)
+        header_layout.setSpacing(10)
+        
+        self.avatar_label = QLabel(self.header_widget)
+        header_layout.addWidget(self.avatar_label)
+        
+        self.author_label = QLabel(self.header_widget)
+        self.author_label.setAlignment(Qt.AlignCenter)
+        self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
+        self.author_label.setStyleSheet("color: white;")
+        
+        shadow_pseudo = QGraphicsDropShadowEffect()
+        shadow_pseudo.setBlurRadius(3)
+        shadow_pseudo.setColor(QColor(0, 0, 0, 255))
+        shadow_pseudo.setOffset(1, 1)
+        self.author_label.setGraphicsEffect(shadow_pseudo)
+        
+        header_layout.addWidget(self.author_label)
+        container_layout.addWidget(self.header_widget)
+        
+        self.media_display_label = QLabel(self.container)
+        self.media_display_label.setAlignment(Qt.AlignCenter)
+        container_layout.addWidget(self.media_display_label)
+
+        self.signals = WorkerSignals()
+        self.signals.video_frame_ready.connect(self.display_frame)
+        self.signals.force_close.connect(QApplication.quit)
+
+        self.media_player = QMediaPlayer(None)
+        self.media_player.mediaStatusChanged.connect(self.on_media_status_changed)
+        
+        self.text_label = QLabel(self.container)
+        self.text_label.setAlignment(Qt.AlignCenter)
+        self.text_label.setWordWrap(True)
+        self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
+        self.text_label.setStyleSheet("color: white;")
+        self.text_label.setMaximumWidth(850)
+        
+        shadow_text = QGraphicsDropShadowEffect()
+        shadow_text.setBlurRadius(3)
+        shadow_text.setColor(QColor(0, 0, 0, 255))
+        shadow_text.setOffset(1, 1)
+        self.text_label.setGraphicsEffect(shadow_text)
+        
+        container_layout.addWidget(self.text_label)
+        
+        self.main_layout.addStretch(1)
+        self.main_layout.addWidget(self.container)
+        self.main_layout.addStretch(1)
+        self.container.hide()
+
+        self.close_timer = QTimer(self)
+        self.close_timer.setSingleShot(True)
+        self.close_timer.timeout.connect(self.finish_media_playback)
+
+        self.video_timer = QTimer(self)
+        self.video_timer.timeout.connect(self.update_video_frame)
+
+    def animate_floating_header(self):
+        if self.container.isVisible():
+            self.float_angle += 0.08
+            offset_y = int(math.sin(self.float_angle) * 3)
+            self.header_widget.setContentsMargins(0, offset_y, 0, -offset_y)
+
+    def on_media_status_changed(self, status):
+        if status == QMediaPlayer.EndOfMedia:
+            print("[PLAYBACK] Fin de la lecture audio/vidéo atteinte.")
+            self.finish_media_playback()
+
+    def update_alignment(self, position):
+        while self.main_layout.count():
+            item = self.main_layout.takeAt(0)
+            if item.widget() and item.widget() != self.container:
+                item.widget().deleteLater()
             
-            if global_queue:
-                current_active_item = global_queue.pop(0)
-                asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+        if position == "left":
+            self.main_layout.addWidget(self.container)
+            self.main_layout.addStretch(1)
+        elif position == "right":
+            self.main_layout.addStretch(1)
+            self.main_layout.addWidget(self.container)
+        else:
+            self.main_layout.addStretch(1)
+            self.main_layout.addWidget(self.container)
+            self.main_layout.addStretch(1)
+
+    def init_network(self):
+        self.signals.update_media.connect(self.handle_new_media)
+        t = threading.Thread(target=self.network_worker, daemon=True)
+        t.start()
+
+    def network_worker(self):
+        print(f"[NETWORK] Démarrage du thread d'écoute pour l'utilisateur: {self.discord_pseudo}")
+        while True:
+            try:
+                res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
+                if res.status_code == 200:
+                    try:
+                        data = res.json()
+                    except json.JSONDecodeError:
+                        print(f"[NETWORK] Réponse non-JSON reçue du serveur : {res.text}")
+                        time.sleep(1.5)
+                        continue
+                    
+                    if data.get("status") == "inactive":
+                        print("[NETWORK] Statut inactif reçu, fermeture immédiate de l'overlay.")
+                        self.signals.force_close.emit()
+                        break
+
+                    new_url = data.get("url")
+
+                    if not new_url:
+                        if self.current_loaded_url is not None:
+                            print("[NETWORK] Plus de média actif, masquage de l'overlay.")
+                            self.current_loaded_url = None
+                            QTimer.singleShot(0, self.hide_overlay_ui)
+                        time.sleep(1.5)
+                        continue
+
+                    elif new_url != self.current_loaded_url and not self.is_transitioning:
+                        self.is_transitioning = True
+                        self.current_loaded_url = new_url
+                        print(f"[NETWORK] Téléchargement du nouveau média : {new_url}")
+                        try:
+                            media_res = requests.get(new_url, timeout=15)
+                            if media_res.status_code == 200:
+                                data["content_bytes"] = media_res.content
+                                
+                                avatar_url = data.get("avatar", "")
+                                if avatar_url:
+                                    try:
+                                        ar = requests.get(avatar_url, timeout=3)
+                                        if ar.status_code == 200:
+                                            data["avatar_bytes"] = ar.content
+                                    except:
+                                        pass
+                                
+                                self.media_in_progress = True
+                                self.signals.update_media.emit(data)
+                            else:
+                                print(f"[NETWORK] Échec du téléchargement du fichier média (Code: {media_res.status_code})")
+                                self.is_transitioning = False
+                        except Exception as e:
+                            print(f"[NETWORK] Erreur lors du téléchargement du média : {e}")
+                            self.is_transitioning = False
+                    else:
+                        time.sleep(1.5)
+                else:
+                    time.sleep(1.5)
+            except Exception as e:
+                print(f"[NETWORK] Erreur de requête serveur : {e}")
+                time.sleep(2)
+
+    def handle_new_media(self, data):
+        try:
+            print("[UI] Affichage du nouveau média sur l'overlay...")
+            self.media_player.stop()
+            self.video_timer.stop()
+            if self.video_capture:
+                self.video_capture.release()
+                self.video_capture = None
+            
+            position = data.get("position", "center")
+            is_game_mode = data.get("game_mode", False)
+            
+            if is_game_mode:
+                self.current_max_size = 380
+                self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+                self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
+                self.text_label.setMaximumWidth(380)
+                avatar_size = 26
             else:
-                current_active_item = None
-            
-    name = current_active_item["name"] if current_active_item else None
-    return jsonify({"status": "success", "next": name})
+                self.current_max_size = 850
+                self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
+                self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
+                self.text_label.setMaximumWidth(850)
+                avatar_size = 40
 
-async def safe_delete_msg(msg):
+            QTimer.singleShot(0, lambda: self.update_alignment(position))
+
+            url = data.get("url")
+            if not url:
+                self.hide_overlay_ui()
+                return
+
+            author = data.get("name", "")
+            meme_txt = data.get("content", "")
+            
+            if meme_txt:
+                self.text_label.setText(meme_txt)
+                self.text_label.show()
+            else:
+                self.text_label.hide()
+
+            self.author_label.setText(str(author))
+            self.author_label.show()
+
+            avatar_bytes = data.get("avatar_bytes")
+            if avatar_bytes:
+                img = QImage.fromData(avatar_bytes)
+                pix = QPixmap.fromImage(img)
+                ring_pixmap = create_discord_avatar_with_ring(pix, size=avatar_size)
+                self.avatar_label.setPixmap(ring_pixmap)
+                self.avatar_label.show()
+            else:
+                self.avatar_label.clear()
+                self.avatar_label.hide()
+
+            content = data.get("content_bytes")
+            is_vid = any(ext in url.lower() for ext in [".mp4", ".mov", ".webm", ".avi"])
+
+            if is_vid:
+                if self.video_file and os.path.exists(self.video_file.name):
+                    try:
+                        self.video_file.close()
+                        os.remove(self.video_file.name)
+                    except:
+                        pass
+
+                suffix = ".mp4"
+                for ext in [".webm", ".mov", ".avi", ".mp4"]:
+                    if ext in url.lower():
+                        suffix = ext
+                        break
+
+                self.video_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                self.video_file.write(content)
+                self.video_file.flush()
+                self.video_file.close()
+                
+                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
+                self.media_player.setVolume(100)
+                self.media_player.play()
+
+                time.sleep(0.05)
+                self.video_capture = cv2.VideoCapture(self.video_file.name)
+                
+                file_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+                if file_fps > 5 and file_fps < 120:
+                    self.fps = file_fps
+                else:
+                    self.fps = 30
+                
+                self.container.show()
+                
+                self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+                self.fade_animation.setDuration(350)
+                self.fade_animation.setStartValue(0.0)
+                self.fade_animation.setEndValue(1.0)
+                self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)
+                self.fade_animation.start()
+
+                self.video_timer.start(int(1000 / self.fps))
+                self.close_timer.stop()
+            else:
+                image = QImage.fromData(content)
+                pixmap = QPixmap.fromImage(image)
+                
+                if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
+                    pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    
+                self.media_display_label.setPixmap(pixmap)
+                self.container.show()
+                
+                self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
+                self.fade_animation.setDuration(350)
+                self.fade_animation.setStartValue(0.0)
+                self.fade_animation.setEndValue(1.0)
+                self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)
+                self.fade_animation.start()
+
+                self.close_timer.start(7000)
+        except Exception as e:
+            print(f"[UI] Erreur dans handle_new_media : {e}")
+            self.hide_overlay_ui()
+        finally:
+            self.is_transitioning = False
+
+    def update_video_frame(self):
+        if not (self.video_capture and self.video_capture.isOpened()):
+            return
+
+        ret, frame = self.video_capture.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            self.signals.video_frame_ready.emit(qt_image)
+        else:
+            if self.media_player.state() != QMediaPlayer.PlayingState:
+                self.video_timer.stop()
+
+    def display_frame(self, image):
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
+            pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.media_display_label.setPixmap(pixmap)
+
+    def finish_media_playback(self):
+        if self.is_clearing:
+            return
+        
+        self.is_clearing = True
+        print("[PLAYBACK] Fin du média, envoi de la requête pop au serveur...")
+        threading.Thread(target=self._send_pop_request, daemon=True).start()
+        self.hide_overlay_ui()
+
+    def _send_pop_request(self):
+        try:
+            res = requests.post(f"{POP_URL}?user={self.discord_pseudo}", timeout=3)
+            print(f"[NETWORK] Requête pop envoyée (Code: {res.status_code})")
+        except Exception as e:
+            print(f"[NETWORK] Erreur pop_meme : {e}")
+
+    def hide_overlay_ui(self):
+        self.video_timer.stop()
+        self.media_player.stop()
+        
+        if self.video_capture:
+            self.video_capture.release()
+            self.video_capture = None
+
+        self.media_display_label.clear()
+        self.author_label.clear()
+        self.avatar_label.clear()
+        self.text_label.clear()
+        self.container.hide()
+        
+        if self.video_file and os.path.exists(self.video_file.name):
+            try:
+                self.video_file.close()
+                os.remove(self.video_file.name)
+            except:
+                pass
+            self.video_file = None
+
+        self.media_in_progress = False
+        self.current_loaded_url = None
+        QTimer.singleShot(500, lambda: setattr(self, 'is_transitioning', False))
+        self.is_clearing = False
+
+def main():
+    check_for_updates()
+
+    app = QApplication(sys.argv)
+    
+    setup = SetupDialog()
+    setup.show()
+    app.exec_()
+    
+    if not setup.pseudo:
+        sys.exit(0)
+
+    safe_pseudo_filename = "".join(c for c in setup.pseudo if c.isalnum() or c in ('_', '-'))
+    lock_file_path = os.path.join(tempfile.gettempdir(), f"overlay_discord_{safe_pseudo_filename}.lock")
+    
+    if os.path.exists(lock_file_path):
+        try:
+            with open(lock_file_path, "r") as f:
+                old_pid = int(f.read().strip())
+            
+            try:
+                import psutil
+                process_exists = psutil.pid_exists(old_pid)
+            except ImportError:
+                process_exists = True 
+
+            if process_exists:
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText(f"L'overlay pour '{setup.pseudo}' est déjà lancé sur ce PC !")
+                msg.setWindowTitle("Déjà en cours d'exécution")
+                msg.exec_()
+                sys.exit(0)
+            else:
+                os.remove(lock_file_path)
+        except:
+            try:
+                os.remove(lock_file_path)
+            except:
+                pass
+
     try:
-        await msg.delete()
-    except Exception:
+        with open(lock_file_path, "w") as f:
+            f.write(str(os.getpid()))
+    except:
         pass
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    print(f"[FLASK] Démarrage du serveur web sur le port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    try:
+        overlay = OverlayWindow(setup.pseudo)
+        overlay.show()
+        exit_code = app.exec_()
+    finally:
+        if os.path.exists(lock_file_path):
+            try:
+                os.remove(lock_file_path)
+            except:
+                pass
+        sys.exit(exit_code)
 
 if __name__ == "__main__":
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if not TOKEN:
-        print("[ERREUR] Token Discord introuvable !")
-    else:
-        print("[DISCORD] Connexion en cours...")
-        bot.run(TOKEN)
+    main()

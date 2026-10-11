@@ -146,13 +146,14 @@ class OverlayWindow(QWidget):
         header_layout.addWidget(self.author_label)
         container_layout.addWidget(self.header_widget)
         
-        # Widget Média pour images et vidéos
+        # Label pour les images fixes
         self.image_label = QLabel(self.container)
         self.image_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.image_label)
 
+        # Widget vidéo natif PyQtMultimedia
         self.video_widget = QVideoWidget(self.container)
-        self.video_widget.setMinimumSize(400, 300)
+        self.video_widget.setFixedSize(850, 480)
         container_layout.addWidget(self.video_widget)
         self.video_widget.hide()
 
@@ -207,16 +208,19 @@ class OverlayWindow(QWidget):
             self.main_layout.addStretch(1)
 
     def init_network(self):
+        print("[NETWORK] Initialisation du thread réseau...")
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
 
     def network_worker(self):
+        print(f"[NETWORK] Thread démarré pour : {self.discord_pseudo}")
         while True:
             try:
                 res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
                 if res.status_code == 200:
                     data = res.json()
                     if data.get("status") == "inactive":
+                        print("[NETWORK] Statut inactif, fermeture.")
                         QTimer.singleShot(0, QApplication.quit)
                         break
 
@@ -231,6 +235,7 @@ class OverlayWindow(QWidget):
                     elif new_url != self.current_loaded_url and not self.is_transitioning:
                         self.is_transitioning = True
                         self.current_loaded_url = new_url
+                        print(f"[NETWORK] Nouveau média reçu : {new_url}")
                         
                         media_res = requests.get(new_url, timeout=15)
                         if media_res.status_code == 200:
@@ -250,23 +255,27 @@ class OverlayWindow(QWidget):
                         time.sleep(1.5)
                 else:
                     time.sleep(1.5)
-            except Exception:
+            except Exception as e:
+                print(f"[NETWORK Erreur] {e}")
                 time.sleep(2)
 
     def handle_new_media(self, data):
         try:
+            print("[UI] Affichage du média dans l'interface...")
             self.media_player.stop()
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
             
             if is_game_mode:
                 self.current_max_size = 380
+                self.video_widget.setFixedSize(380, 215)
                 self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
                 self.text_label.setMaximumWidth(380)
                 avatar_size = 26
             else:
                 self.current_max_size = 850
+                self.video_widget.setFixedSize(850, 480)
                 self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
                 self.text_label.setMaximumWidth(850)
@@ -305,6 +314,7 @@ class OverlayWindow(QWidget):
             is_vid = any(ext in url.lower() for ext in [".mp4", ".mov", ".webm", ".avi"])
 
             if is_vid:
+                print("[VIDEO] Lancement du lecteur vidéo natif...")
                 self.image_label.hide()
                 self.video_widget.show()
 
@@ -329,8 +339,10 @@ class OverlayWindow(QWidget):
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
                 self.container.show()
                 self.media_player.play()
+                print("[VIDEO] Lecture démarrée.")
                 self.close_timer.stop()
             else:
+                print("[IMAGE] Affichage de l'image fixe...")
                 self.video_widget.hide()
                 self.image_label.show()
 
@@ -343,13 +355,14 @@ class OverlayWindow(QWidget):
                 self.container.show()
                 self.close_timer.start(7000)
         except Exception as e:
-            print(f"Erreur UI : {e}")
+            print(f"[UI Erreur] {e}")
             self.hide_overlay_ui()
         finally:
             self.is_transitioning = False
 
     def media_state_changed(self, state):
         if state == QMediaPlayer.EndOfMedia:
+            print("[VIDEO] Fin de la lecture vidéo.")
             self.finish_media_playback()
 
     def finish_media_playback(self):

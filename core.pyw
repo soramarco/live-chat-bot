@@ -6,12 +6,13 @@ from io import BytesIO
 import tempfile
 import os
 import threading
-import cv2
 import json
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath
+from PyQt5.QtCore import Qt, QTimer, QUrl, QPropertyAnimation
+from PyQt5.QtGui import QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage
 from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QGraphicsOpacityEffect
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtMultimediaWidgets import QVideoWidget
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
 SERVER_URL = "https://live-chat-bot-ctus.onrender.com/get_next_meme"
@@ -80,20 +81,11 @@ def create_discord_avatar_with_ring(pixmap, size=40):
     painter.end()
     return result
 
-class WorkerSignals(QObject):
-    update_media = pyqtSignal(dict)
-    video_frame_ready = pyqtSignal(QImage)
-    force_close = pyqtSignal()
-
 class OverlayWindow(QWidget):
     def __init__(self, discord_pseudo):
         super().__init__()
         self.discord_pseudo = discord_pseudo
         self.video_file = None
-        self.video_capture = None
-        self.fps = 30
-        self.video_timer = QTimer(self)
-        self.is_clearing = False
         self.current_loaded_url = None
         self.is_transitioning = False
         self.current_max_size = 850
@@ -154,14 +146,20 @@ class OverlayWindow(QWidget):
         header_layout.addWidget(self.author_label)
         container_layout.addWidget(self.header_widget)
         
-        self.media_display_label = QLabel(self.container)
-        self.media_display_label.setAlignment(Qt.AlignCenter)
-        container_layout.addWidget(self.media_display_label)
+        # Widget Média pour images et vidéos
+        self.image_label = QLabel(self.container)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        container_layout.addWidget(self.image_label)
 
-        self.signals = WorkerSignals()
-        self.signals.video_frame_ready.connect(self.display_frame)
-        self.signals.force_close.connect(QApplication.quit)
-        
+        self.video_widget = QVideoWidget(self.container)
+        self.video_widget.setMinimumSize(400, 300)
+        container_layout.addWidget(self.video_widget)
+        self.video_widget.hide()
+
+        self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
+        self.media_player.setVideoOutput(self.video_widget)
+        self.media_player.stateChanged.connect(self.media_state_changed)
+
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setWordWrap(True)
@@ -184,9 +182,6 @@ class OverlayWindow(QWidget):
         self.close_timer = QTimer(self)
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
-
-        self.video_timer = QTimer(self)
-        self.video_timer.timeout.connect(self.update_video_frame)
 
     def animate_floating_header(self):
         if self.container.isVisible():
@@ -212,22 +207,17 @@ class OverlayWindow(QWidget):
             self.main_layout.addStretch(1)
 
     def init_network(self):
-        print("[NETWORK] Initialisation du thread réseau...")
-        self.signals.update_media.connect(self.handle_new_media)
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
 
     def network_worker(self):
-        print(f"[NETWORK] Thread démarré pour l'utilisateur: {self.discord_pseudo}")
         while True:
             try:
                 res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
                 if res.status_code == 200:
                     data = res.json()
-                    
                     if data.get("status") == "inactive":
-                        print("[NETWORK] Statut inactif reçu, fermeture.")
-                        self.signals.force_close.emit()
+                        QTimer.singleShot(0, QApplication.quit)
                         break
 
                     new_url = data.get("url")
@@ -241,7 +231,6 @@ class OverlayWindow(QWidget):
                     elif new_url != self.current_loaded_url and not self.is_transitioning:
                         self.is_transitioning = True
                         self.current_loaded_url = new_url
-                        print(f"[NETWORK] Nouveau média détecté : {new_url}")
                         
                         media_res = requests.get(new_url, timeout=15)
                         if media_res.status_code == 200:
@@ -254,25 +243,19 @@ class OverlayWindow(QWidget):
                                         data["avatar_bytes"] = ar.content
                                 except:
                                     pass
-                            self.signals.update_media.emit(data)
+                            QTimer.singleShot(0, lambda d=data: self.handle_new_media(d))
                         else:
                             self.is_transitioning = False
                     else:
                         time.sleep(1.5)
                 else:
                     time.sleep(1.5)
-            except Exception as e:
-                print(f"[NETWORK Erreur] {e}")
+            except Exception:
                 time.sleep(2)
 
     def handle_new_media(self, data):
         try:
-            print("[UI] Affichage du média...")
-            self.video_timer.stop()
-            if self.video_capture:
-                self.video_capture.release()
-                self.video_capture = None
-            
+            self.media_player.stop()
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
             
@@ -289,7 +272,7 @@ class OverlayWindow(QWidget):
                 self.text_label.setMaximumWidth(850)
                 avatar_size = 40
 
-            QTimer.singleShot(0, lambda: self.update_alignment(position))
+            self.update_alignment(position)
 
             url = data.get("url")
             if not url:
@@ -322,6 +305,9 @@ class OverlayWindow(QWidget):
             is_vid = any(ext in url.lower() for ext in [".mp4", ".mov", ".webm", ".avi"])
 
             if is_vid:
+                self.image_label.hide()
+                self.video_widget.show()
+
                 if self.video_file and os.path.exists(self.video_file.name):
                     try:
                         self.video_file.close()
@@ -339,58 +325,32 @@ class OverlayWindow(QWidget):
                 self.video_file.write(content)
                 self.video_file.flush()
                 self.video_file.close()
-                
-                self.video_capture = cv2.VideoCapture(self.video_file.name)
-                file_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
-                self.fps = file_fps if (file_fps and 5 < file_fps < 120) else 30
-                
-                self.container.show()
-                self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-                self.fade_animation.setDuration(350)
-                self.fade_animation.setStartValue(0.0)
-                self.fade_animation.setEndValue(1.0)
-                self.fade_animation.start()
 
-                self.video_timer.start(int(1000 / self.fps))
+                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
+                self.container.show()
+                self.media_player.play()
                 self.close_timer.stop()
             else:
+                self.video_widget.hide()
+                self.image_label.show()
+
                 image = QImage.fromData(content)
                 pixmap = QPixmap.fromImage(image)
                 if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
                     pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 
-                self.media_display_label.setPixmap(pixmap)
+                self.image_label.setPixmap(pixmap)
                 self.container.show()
-                self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-                self.fade_animation.setDuration(350)
-                self.fade_animation.setStartValue(0.0)
-                self.fade_animation.setEndValue(1.0)
-                self.fade_animation.start()
-
                 self.close_timer.start(7000)
         except Exception as e:
-            print(f"[UI Erreur] {e}")
+            print(f"Erreur UI : {e}")
             self.hide_overlay_ui()
         finally:
             self.is_transitioning = False
 
-    def update_video_frame(self):
-        if not (self.video_capture and self.video_capture.isOpened()):
-            return
-        ret, frame = self.video_capture.read()
-        if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = frame.shape
-            self.signals.video_frame_ready.emit(QImage(frame.data, w, h, ch * w, QImage.Format_RGB888))
-        else:
-            self.video_timer.stop()
+    def media_state_changed(self, state):
+        if state == QMediaPlayer.EndOfMedia:
             self.finish_media_playback()
-
-    def display_frame(self, image):
-        pixmap = QPixmap.fromImage(image)
-        if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
-            pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.media_display_label.setPixmap(pixmap)
 
     def finish_media_playback(self):
         if self.is_clearing:
@@ -406,11 +366,10 @@ class OverlayWindow(QWidget):
             pass
 
     def hide_overlay_ui(self):
-        self.video_timer.stop()
-        if self.video_capture:
-            self.video_capture.release()
-            self.video_capture = None
-        self.media_display_label.clear()
+        self.media_player.stop()
+        self.image_label.clear()
+        self.video_widget.hide()
+        self.image_label.hide()
         self.author_label.clear()
         self.avatar_label.clear()
         self.text_label.clear()

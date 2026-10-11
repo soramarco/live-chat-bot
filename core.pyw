@@ -513,6 +513,15 @@ class OverlayWindow(QWidget):
         self.current_author = ""
         self.current_avatar_source = None
         self._current_image_pixmap = None
+        self.current_loaded_item_key = None
+        # Le thread réseau ne doit jamais modifier l'état Qt du média affiché.
+        # Cet événement reste actif du début du téléchargement jusqu'à la fin
+        # réelle du média et à la réponse du endpoint /pop_meme.
+        self._network_state_lock = threading.RLock()
+        self._display_busy = threading.Event()
+        self._network_seen_url = None
+        self._network_last_done_url = None
+        self._network_idle_seen = True
 
         self.media_ready.connect(self.handle_new_media)
         self.settings_ready.connect(self.apply_live_settings)
@@ -547,7 +556,12 @@ class OverlayWindow(QWidget):
         self.image_label = FrameDisplayWidget(self.container, fixed_box=False)
         container_layout.addWidget(self.image_label, 0, Qt.AlignCenter)
 
-        self.video_label = FrameDisplayWidget(self.container, fixed_box=True)
+        # Pour la vidéo, utiliser un vrai QLabel/QPixmap. Le widget peint à la
+        # main avec CompositionMode_Source causait une disparition des frames
+        # dans la fenêtre translucide sous Windows (l'audio continuait pourtant).
+        self.video_label = QLabel(self.container)
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setStyleSheet("background: transparent; border: none;")
         self.video_label.setFixedSize(850, 480)
         container_layout.addWidget(self.video_label, 0, Qt.AlignCenter)
         self.video_label.hide()
@@ -589,12 +603,11 @@ class OverlayWindow(QWidget):
             animation.deleteLater()
         self._fade_animations = []
 
+        # L'opacité locale du QLabel vidéo n'est pas animée : une animation
+        # d'opacité sur les frames dans une fenêtre translucide provoquait des
+        # frames invisibles sous Windows. Le header et les images gardent leur fondu.
         targets = [self.header]
-        # isVisible() reste False tant que le parent container est masqué.
-        # isHidden() permet de tester l'état propre du widget avant de montrer le parent.
-        if not self.video_label.isHidden():
-            targets.append(self.video_label)
-        elif not self.image_label.isHidden():
+        if self.video_label.isHidden() and not self.image_label.isHidden():
             targets.append(self.image_label)
 
         for widget in targets:
@@ -691,6 +704,11 @@ class OverlayWindow(QWidget):
         self.quit_requested.emit()
 
     def network_worker(self):
+        """Poll le serveur sans toucher à la vidéo déjà en cours.
+
+        Un état url=None isolé ne doit jamais cacher/arrêter un média en cours.
+        Le média suivant n'est téléchargé qu'après sa fin et /pop_meme.
+        """
         session = requests.Session()
         last_logged = None
         last_err = None
@@ -730,8 +748,7 @@ class OverlayWindow(QWidget):
                     self.request_quit("le serveur dit que le live chat est inactif")
                     return
 
-                # Le serveur renvoie position/mode jeu même lorsqu'aucun nouveau
-                # média n'est disponible. On les applique donc indépendamment de l'URL.
+                # Les réglages continuent d'être actualisés pendant un média.
                 self.settings_ready.emit({
                     "position": data.get("position", "center"),
                     "game_mode": bool(data.get("game_mode", False)),
@@ -739,22 +756,44 @@ class OverlayWindow(QWidget):
 
                 new_url = data.get("url")
                 if not new_url:
-                    self.last_done_url = None
-                    if self.current_loaded_url is not None:
-                        self.current_loaded_url = None
-                        self.hide_requested.emit()
-                    time.sleep(1.5)
+                    # Ne pas interpréter un état vide transitoire comme la fin
+                    # du média : seul EndOfMedia / le timer d'image la valide.
+                    if not self._display_busy.is_set():
+                        with self._network_state_lock:
+                            self._network_idle_seen = True
+                            self._network_seen_url = None
+                            self._network_last_done_url = None
+                    time.sleep(0.8)
                     continue
 
-                if new_url == self.last_done_url or new_url == self.current_loaded_url:
-                    time.sleep(1.5)
+                # L'identifiant de message permet de diffuser deux messages qui
+                # partagent la même URL de pièce jointe comme deux éléments distincts.
+                item_key = str(data.get("item_id") or new_url)
+
+                # Tant que le média courant s'affiche (ou se télécharge), ignorer
+                # toute nouvelle entrée. Elle sera reprise après /pop_meme.
+                if self._display_busy.is_set():
+                    time.sleep(0.5)
                     continue
 
-                self.current_loaded_url = new_url
+                with self._network_state_lock:
+                    if item_key == self._network_seen_url:
+                        time.sleep(0.5)
+                        continue
+                    if item_key == self._network_last_done_url and not self._network_idle_seen:
+                        time.sleep(0.5)
+                        continue
+                    # Réserver immédiatement l'élément avant de commencer son
+                    # téléchargement pour empêcher un second lancement parallèle.
+                    self._display_busy.set()
+                    self._network_seen_url = item_key
+                    self._network_idle_seen = False
+
                 try:
                     media_res = session.get(new_url, timeout=20)
                     if media_res.status_code != 200:
                         raise RuntimeError(f"téléchargement du média : HTTP {media_res.status_code}")
+                    data["url"] = new_url
                     data["content_bytes"] = media_res.content
                     data["content_type"] = media_res.headers.get("Content-Type", "")
                     log(f"Média téléchargé ({len(media_res.content)} octets, {data['content_type']})")
@@ -773,36 +812,76 @@ class OverlayWindow(QWidget):
                             ar = session.get(avatar_url, timeout=5)
                             if ar.status_code == 200:
                                 data["avatar_bytes"] = ar.content
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log(f"Téléchargement de l'avatar ignoré : {e}")
+
                     fail_url, fail_count = None, 0
                     self.media_ready.emit(data)
+                    # _display_busy reste actif jusqu'à la fin côté interface.
                 except UnsupportedMedia as e:
                     log(f"Média ignoré : {e}")
-                    self.last_done_url = new_url
-                    self.current_loaded_url = None
-                    self._send_pop_request()
+                    self._post_pop_and_release(item_key, session=session)
                     fail_url, fail_count = None, 0
                 except Exception as e:
                     log(f"Échec média : {e}")
-                    self.current_loaded_url = None
                     if fail_url == new_url:
                         fail_count += 1
                     else:
                         fail_url, fail_count = new_url, 1
                     if fail_count >= 3:
                         log("Média abandonné après 3 échecs, on le passe")
-                        self.last_done_url = new_url
-                        self._send_pop_request()
+                        self._post_pop_and_release(item_key, session=session)
                         fail_url, fail_count = None, 0
-                    time.sleep(2)
+                    else:
+                        # Autoriser un nouvel essai sur la même URL.
+                        with self._network_state_lock:
+                            self._network_seen_url = None
+                        self._display_busy.clear()
+                        time.sleep(2)
 
             except Exception as e:
                 msg = f"Erreur réseau : {e}"
                 if msg != last_err:
                     log(msg)
                     last_err = msg
+                # Ne pas effacer l'état média ici : une erreur temporaire de
+                # polling ne doit pas interrompre la lecture en cours.
                 time.sleep(2)
+
+    def _post_pop_and_release(self, completed_key, session=None):
+        """Passe l'élément en cours, puis libère la file côté client."""
+        client = session or requests
+        last_error = None
+        for attempt in range(4):
+            try:
+                response = client.post(POP_URL, params={"user": self.discord_pseudo}, timeout=8)
+                try:
+                    result = response.json()
+                except Exception:
+                    result = {}
+                log(f"Réponse pop_meme : HTTP {response.status_code}, {result}")
+
+                if response.status_code < 400 and result.get("status") not in ("ignored",):
+                    with self._network_state_lock:
+                        self._network_last_done_url = completed_key
+                        self._network_seen_url = completed_key
+                        self._network_idle_seen = False
+                    self._display_busy.clear()
+                    return
+
+                last_error = f"HTTP {response.status_code}, statut={result.get('status')}"
+            except Exception as e:
+                last_error = str(e)
+                log(f"Erreur pop_meme (tentative {attempt + 1}/4) : {e}")
+
+            # Le serveur a un anti-double-clic de 1,5 s. Garder le verrou actif
+            # pendant l'attente évite de redémarrer le même média par erreur.
+            time.sleep(1.6 if attempt < 3 else 0)
+
+        log(f"Impossible de confirmer pop_meme après 4 tentatives : {last_error}")
+        with self._network_state_lock:
+            self._network_seen_url = None
+        self._display_busy.clear()
 
     def apply_live_settings(self, data, force=False):
         """Applique position et mode jeu même si la vidéo actuelle n'a pas changé."""
@@ -850,6 +929,9 @@ class OverlayWindow(QWidget):
     def handle_new_media(self, data):
         try:
             self.is_clearing = False
+            # Cet état est propre au thread graphique ; le thread réseau n'y touche plus.
+            self.current_loaded_url = data.get("url")
+            self.current_loaded_item_key = str(data.get("item_id") or data.get("url") or "")
             self.media_player.stop()
             self.apply_live_settings(data, force=True)
             if self.current_game_mode:
@@ -942,21 +1024,32 @@ class OverlayWindow(QWidget):
     def on_video_frame(self, img):
         if self.current_loaded_url is None or img is None or img.isNull():
             return
-        # L'image émise par FrameSurface est déjà une copie indépendante du
-        # buffer vidéo et déjà adaptée à la zone vidéo. On ne la rescale pas une
-        # deuxième fois : éviter une copie inutile limite aussi les soucis de
-        # rafraîchissement du QLabel sur les fenêtres transparentes Windows.
-        frame = img.convertToFormat(QImage.Format_RGB32).copy()
-        if frame.isNull():
-            log("Image vidéo reçue mais copie QImage impossible")
-            return
-        if not self.video_label.isVisible():
-            self.video_label.show()
-        self.video_label.setImage(frame)
-        self._video_frames_shown += 1
-        if self._video_frames_shown == 1:
-            log(f"Première image peinte par FrameDisplayWidget : {frame.width()}x{frame.height()}, "
-                f"zone {self.video_label.width()}x{self.video_label.height()}")
+        try:
+            # QLabel/QPixmap utilise le chemin de composition standard de Qt.
+            # Ajustement explicite au cadre sans étirer le média.
+            target = img.size().scaled(self.video_label.size(), Qt.KeepAspectRatio)
+            if target.isEmpty():
+                return
+            if img.size() != target:
+                frame = img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            else:
+                frame = img.copy()
+            pixmap = QPixmap.fromImage(frame.copy())
+            if pixmap.isNull():
+                log("Image vidéo reçue mais conversion en QPixmap impossible")
+                return
+            if self.video_label.pixmap() is None:
+                self.video_label.clear()
+            if self.video_label.isHidden():
+                self.video_label.show()
+            self.video_label.setPixmap(pixmap)
+            self.video_label.update()
+            self._video_frames_shown += 1
+            if self._video_frames_shown == 1:
+                log(f"Première image envoyée au QLabel natif : {pixmap.width()}x{pixmap.height()}, "
+                    f"zone {self.video_label.width()}x{self.video_label.height()}")
+        except Exception:
+            log("Erreur d'affichage d'une frame vidéo :\n" + traceback.format_exc())
 
     def on_media_status(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -975,15 +1068,21 @@ class OverlayWindow(QWidget):
             return
         self.is_clearing = True
         self.close_timer.stop()
-        self.last_done_url = self.current_loaded_url
-        threading.Thread(target=self._send_pop_request, daemon=True).start()
+        completed_url = self.current_loaded_url
+        completed_key = self.current_loaded_item_key or completed_url
+        self.last_done_url = completed_url
         self.hide_overlay_ui()
+        # La file ne se débloque qu'après que le serveur a confirmé /pop_meme.
+        threading.Thread(target=self._send_pop_request, args=(completed_key,), daemon=True).start()
 
-    def _send_pop_request(self):
+    def _send_pop_request(self, completed_key=None):
         try:
-            requests.post(POP_URL, params={"user": self.discord_pseudo}, timeout=5)
+            self._post_pop_and_release(completed_key or self.last_done_url)
         except Exception as e:
             log(f"Erreur pop_meme : {e}")
+            with self._network_state_lock:
+                self._network_seen_url = None
+            self._display_busy.clear()
 
     def _cleanup_video_file(self):
         if self.video_path:
@@ -1020,7 +1119,8 @@ class OverlayWindow(QWidget):
         self.current_avatar_source = None
         self._current_image_pixmap = None
         self.current_loaded_url = None
-        self.is_clearing = False
+        self.current_loaded_item_key = None
+        # is_clearing repassera à False quand le média suivant sera accepté.
 
     def cleanup(self):
         self._cleanup_video_file()

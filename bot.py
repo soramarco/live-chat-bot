@@ -74,20 +74,25 @@ async def refresh_or_repost_panel(channel):
     content = get_main_panel_content()
     
     try:
+        # Si on a déjà l'objet du message en mémoire, on l'édite directement pour éviter le spam
         if main_panel_message:
             try:
-                await main_panel_message.delete()
+                await main_panel_message.edit(content=content, view=view)
+                return
             except Exception:
-                pass
-            main_panel_message = None
+                main_panel_message = None
 
+        # Recherche d'un message existant dans l'historique récent pour l'éditer au lieu d'en poster un nouveau
         async for message in channel.history(limit=25):
-            if message.author == bot.user and ("Panneau de contrôle du Live Chat" in message.content or "Gérer mon Live Chat" in message.content):
+            if message.author == bot.user and "Panneau de contrôle du Live Chat" in message.content:
                 try:
-                    await message.delete()
+                    main_panel_message = message
+                    await message.edit(content=content, view=view)
+                    return
                 except Exception:
                     pass
-                    
+                
+        # S'il n'y en a aucun, on envoie un message unique initial
         main_panel_message = await channel.send(content, view=view)
     except Exception as e:
         print(f"Erreur rafraîchissement panneau : {e}")
@@ -152,6 +157,9 @@ class PersonalControlView(discord.ui.View):
             save_data()
         self.update_button_styles()
         await self.update_response(interaction)
+
+        if main_panel_message:
+            asyncio.create_task(refresh_or_repost_panel(main_panel_message.channel))
 
     @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -295,7 +303,6 @@ class ItemStopView(discord.ui.View):
 
     @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Réponse immédiate pour éviter le chargement infini "réfléchit..."
         await interaction.response.defer()
             
         global current_active_item, global_queue, last_pop_time

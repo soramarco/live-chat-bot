@@ -226,7 +226,6 @@ class OverlayWindow(QWidget):
                 res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
                 if res.status_code == 200:
                     data = res.json()
-                    # Si l'utilisateur a désactivé son live chat sur Discord, on ferme l'app proprement
                     if data.get("status") == "inactive":
                         print("[NETWORK] Statut inactif sur Discord, fermeture automatique...")
                         QTimer.singleShot(0, QApplication.quit)
@@ -405,36 +404,32 @@ class OverlayWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     
-    # Nettoyage intelligent du fichier lock s'il est orphelin (ex: crash ou kill du gestionnaire des tâches)
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, "r") as f:
-                pid = int(f.read().strip())
-            # Vérifie si le processus tourne encore réellement sur Windows
-            import psutil
-            if not psutil.pid_exists(pid):
-                os.remove(LOCK_FILE)
-        except Exception:
-            # Si psutil n'est pas installé ou en cas de doute après un certain temps, on nettoie
+    # Sécurité anti-double instance ultra-propre : on tente de créer ou d'ouvrir le fichier lock en mode exclusif
+    lock_fd = None
+    try:
+        # Si le fichier lock existe, on tente de l'ouvrir en écriture exclusive pour voir s'il est vraiment utilisé
+        if os.path.exists(LOCK_FILE):
             try:
+                # Si le fichier a plus de 10 secondes et qu'il n'y a pas de vraie instance active, on le nettoie d'office
                 if time.time() - os.path.getmtime(LOCK_FILE) > 10:
                     os.remove(LOCK_FILE)
             except:
                 pass
 
-    if os.path.exists(LOCK_FILE):
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("Live Chat déjà actif")
-        msg.setText("Le live chat est déjà actif sur le PC !")
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
-        sys.exit(0)
-        
-    try:
-        with open(LOCK_FILE, "w") as f:
-            f.write(str(os.getpid()))
-    except:
+        if os.path.exists(LOCK_FILE):
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Live Chat déjà actif")
+            msg.setText("Le live chat est déjà actif sur le PC !")
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec_()
+            sys.exit(0)
+
+        # On crée le fichier lock pour marquer le lancement
+        lock_fd = open(LOCK_FILE, "w")
+        lock_fd.write("locked")
+        lock_fd.flush()
+    except Exception:
         pass
 
     setup = SetupDialog()
@@ -442,8 +437,16 @@ def main():
     app.exec_()
     
     if not setup.pseudo:
+        if lock_fd:
+            try:
+                lock_fd.close()
+            except:
+                pass
         if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
+            try:
+                os.remove(LOCK_FILE)
+            except:
+                pass
         sys.exit(0)
 
     overlay = OverlayWindow(setup.pseudo)
@@ -451,6 +454,11 @@ def main():
     
     exit_code = app.exec_()
     
+    if lock_fd:
+        try:
+            lock_fd.close()
+        except:
+            pass
     if os.path.exists(LOCK_FILE):
         try:
             os.remove(LOCK_FILE)

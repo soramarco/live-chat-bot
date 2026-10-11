@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 STORAGE_FILE = "bot_storage.json"
-TARGET_CHANNEL_ID = 1544497366814560318  # ID de ton salon Discord sous forme d'entier brut
+TARGET_CHANNEL_ID = 1544497366814560318  # ID de ton salon Discord
 
 global_queue = []
 current_active_item = None
@@ -20,8 +20,6 @@ user_positions = {}
 user_game_modes = {}
 data_lock = threading.Lock()
 last_pop_time = 0
-
-main_panel_message = None
 
 def load_data():
     global user_positions, active_users, user_game_modes
@@ -54,42 +52,9 @@ load_data()
 def home():
     return "Bot is alive!", 200
 
-def get_main_panel_content():
-    with data_lock:
-        count = len(active_users)
-        if count == 0:
-            users_str = "_Personne_"
-        else:
-            users_str = ", ".join(f"**{u}**" for u in active_users)
-    return (
-        "🎛️ **Panneau de contrôle du Live Chat**\n"
-        f"📊 **Statut en direct** : {count} actif(s)\n"
-        f"👤 **Connectés** : {users_str}\n\n"
-        "Clique sur le bouton ci-dessous pour gérer ton affichage et ta position :"
-    )
-
-async def refresh_or_repost_panel(channel):
-    global main_panel_message
-    view = MainPanelView()
-    content = get_main_panel_content()
-    
-    try:
-        # Supprime tous les anciens panneaux de contrôle pour éviter les doublons dans le salon
-        async for message in channel.history(limit=30):
-            if message.author == bot.user and "Panneau de contrôle du Live Chat" in message.content:
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-
-        # Poste un nouveau panneau tout en bas du salon
-        main_panel_message = await channel.send(content, view=view)
-    except Exception as e:
-        print(f"Erreur rafraîchissement panneau : {e}")
-
 class PersonalControlView(discord.ui.View):
     def __init__(self, is_active, username):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.is_active = is_active
         self.username = username
         self.update_button_styles()
@@ -119,10 +84,10 @@ class PersonalControlView(discord.ui.View):
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
         self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0, custom_id="persistent_toggle_btn")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-            
+        
         with data_lock:
             if self.username in active_users:
                 active_users.remove(self.username)
@@ -135,10 +100,7 @@ class PersonalControlView(discord.ui.View):
         self.update_button_styles()
         await self.update_response(interaction)
 
-        if main_panel_message:
-            asyncio.create_task(refresh_or_repost_panel(main_panel_message.channel))
-
-    @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0, custom_id="persistent_game_mode_btn")
     async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         with data_lock:
@@ -148,10 +110,7 @@ class PersonalControlView(discord.ui.View):
         self.update_button_styles()
         await self.update_response(interaction)
 
-        if main_panel_message:
-            asyncio.create_task(refresh_or_repost_panel(main_panel_message.channel))
-
-    @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1, custom_id="persistent_left_btn")
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         with data_lock:
@@ -160,7 +119,7 @@ class PersonalControlView(discord.ui.View):
         self.update_button_styles()
         await self.update_response(interaction)
 
-    @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1, custom_id="persistent_center_btn")
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         with data_lock:
@@ -169,7 +128,7 @@ class PersonalControlView(discord.ui.View):
         self.update_button_styles()
         await self.update_response(interaction)
 
-    @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1, custom_id="persistent_right_btn")
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         with data_lock:
@@ -179,45 +138,21 @@ class PersonalControlView(discord.ui.View):
         await self.update_response(interaction)
 
     async def update_response(self, interaction):
+        with data_lock:
+            count = len(active_users)
+            users_str = ", ".join(f"**{u}**" for u in active_users) if count > 0 else "_Personne_"
+        
         current_pos = user_positions.get(self.username, 'center').upper()
         gm_status = "OUI" if user_game_modes.get(self.username, False) else "NON"
-        status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**" 
-            if self.is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
-        )
-        try:
-            await interaction.message.edit(content=status_text, view=self)
-        except Exception as e:
-            print(f"Erreur mise à jour position/mode jeu : {e}")
-
-class MainPanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v77")
-    async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=True)
-        except Exception:
-            pass
-            
-        username = interaction.user.display_name
-        with data_lock:
-            is_active = username in active_users
-            current_pos = user_positions.get(username, "center").upper()
-            gm_status = "OUI" if user_game_modes.get(username, False) else "NON"
         
-        status_text = (
-            f"🟢 **Ton Live Chat est ACTIF !** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**" 
-            if is_active 
-            else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
+        content = (
+            f"📊 **Statut en direct** : {count} actif(s) | 👤 **Connectés** : {users_str}\n"
+            f"{'🟢 **Ton Live Chat est ACTIF !**' if self.is_active else '🔴 **Ton Live Chat est DÉSACTIVÉ.**'} | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
         )
-        view = PersonalControlView(is_active, username)
         try:
-            await interaction.followup.send(content=status_text, view=view, ephemeral=True)
+            await interaction.message.edit(content=content, view=self)
         except Exception as e:
-            print(f"Erreur d'affichage du panneau : {e}")
+            print(f"Erreur mise à jour message : {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -228,16 +163,7 @@ def is_target_channel(channel):
 
 @bot.event
 async def on_ready():
-    global main_panel_message
     print(f"[DISCORD] Connexion réussie en tant que {bot.user}")
-
-    bot.add_view(MainPanelView())
-    
-    channel = bot.get_channel(TARGET_CHANNEL_ID)
-    if channel:
-        await refresh_or_repost_panel(channel)
-    else:
-        print("[AVERTISSEMENT] Le salon cible est introuvable avec cet ID !")
 
 @bot.event
 async def on_message(message):
@@ -280,8 +206,25 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        await asyncio.sleep(0.3)
-        await refresh_or_repost_panel(message.channel)
+        # Envoi automatique du panneau de contrôle personnel tout en bas à chaque message/média
+        username = message.author.display_name
+        with data_lock:
+            is_active = username in active_users
+            count = len(active_users)
+            users_str = ", ".join(f"**{u}**" for u in active_users) if count > 0 else "_Personne_"
+            current_pos = user_positions.get(username, "center").upper()
+            gm_status = "OUI" if user_game_modes.get(username, False) else "NON"
+
+        panel_content = (
+            f"📊 **Statut en direct** : {count} actif(s) | 👤 **Connectés** : {users_str}\n"
+            f"{'🟢 **Ton Live Chat est ACTIF !**' if is_active else '🔴 **Ton Live Chat est DÉSACTIVÉ.**'} | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
+        )
+        view = PersonalControlView(is_active, username)
+        
+        try:
+            await message.channel.send(content=panel_content, view=view)
+        except Exception as e:
+            print(f"Erreur envoi panneau bas de salon : {e}")
 
     await bot.process_commands(message)
 

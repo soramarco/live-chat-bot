@@ -99,7 +99,7 @@ class SetupDialog(QWidget):
                     f.write(text)
             except:
                 pass
-            self.hide()
+            self.close()
 
 def create_discord_avatar_with_ring(pixmap, size=40):
     total_size = size + 8
@@ -145,10 +145,10 @@ class OverlayWindow(QWidget):
         self.is_transitioning = False
         self.current_max_size = 850
         
-        # Timer pour l'effet de lévitation fluide uniquement sur l'avatar
+        # Timer pour l'effet de lévitation fluide sur l'en-tête (Avatar + Pseudo)
         self.float_angle = 0.0
         self.float_timer = QTimer(self)
-        self.float_timer.timeout.connect(self.animate_floating_avatar)
+        self.float_timer.timeout.connect(self.animate_floating_header)
         self.float_timer.start(30)
         
         self.init_ui()
@@ -181,6 +181,7 @@ class OverlayWindow(QWidget):
         self.container.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
 
+        # En-tête regroupant l'Avatar et le Pseudo
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
@@ -241,11 +242,12 @@ class OverlayWindow(QWidget):
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self.update_video_frame)
 
-    def animate_floating_avatar(self):
+    def animate_floating_header(self):
+        # Mouvement d'oscillation verticale fluide limité à l'en-tête (Avatar + Pseudo)
         if self.container.isVisible():
             self.float_angle += 0.08
             offset_y = int(math.sin(self.float_angle) * 3)
-            self.avatar_label.setContentsMargins(0, offset_y, 0, -offset_y)
+            self.header_widget.setContentsMargins(0, offset_y, 0, -offset_y)
 
     def on_media_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia:

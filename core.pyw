@@ -1,23 +1,101 @@
 import sys
+import os
 import time
 import math
-import requests
+import json
 import tempfile
-import os
 import threading
+import traceback
+from urllib.parse import urlparse
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF
-from PyQt5.QtGui import QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QGraphicsOpacityEffect, QMessageBox, QGraphicsView, QGraphicsScene
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-from PyQt5.QtMultimediaWidgets import QGraphicsVideoItem
+import requests
+
+# ---------------------------------------------------------------------------
+# JOURNAL DE DEBUG : C:\Users\<toi>\overlay_debug.log
+# (indispensable car pythonw n'affiche aucune erreur)
+# ---------------------------------------------------------------------------
+LOG_FILE = os.path.join(os.path.expanduser("~"), "overlay_debug.log")
+_log_lock = threading.Lock()
+
+
+def log(msg):
+    try:
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%H:%M:%S ") + str(msg) + "\n")
+    except Exception:
+        pass
+
+
+def _reset_log():
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 300000:
+            os.remove(LOG_FILE)
+    except Exception:
+        pass
+
+
+def _excepthook(exc_type, exc_value, exc_tb):
+    log("CRASH :\n" + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+
+
+sys.excepthook = _excepthook
+try:
+    threading.excepthook = lambda a: _excepthook(a.exc_type, a.exc_value, a.exc_traceback)
+except Exception:
+    pass
+
+_reset_log()
+log("=== Démarrage core.pyw ===")
+
+try:
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, pyqtSignal
+    from PyQt5.QtGui import QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage
+    from PyQt5.QtWidgets import (
+        QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
+        QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox,
+        QGraphicsView, QGraphicsScene,
+    )
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+    from PyQt5.QtMultimediaWidgets import QGraphicsVideoItem
+except Exception:
+    log("IMPOSSIBLE D'IMPORTER PyQt5 :\n" + traceback.format_exc())
+    sys.exit(1)
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
-LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.lock")
-SERVER_URL = "https://live-chat-bot-ctus.onrender.com/get_next_meme"
-POP_URL = "https://live-chat-bot-ctus.onrender.com/pop_meme"
+OLD_LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.lock")
+BASE_URL = "https://live-chat-bot-ctus.onrender.com"
+SERVER_URL = BASE_URL + "/get_next_meme"
+POP_URL = BASE_URL + "/pop_meme"
 
-class SetupDialog(QWidget):
+VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
+
+# ---------------------------------------------------------------------------
+# UNE SEULE INSTANCE (mutex Windows : disparait tout seul si le process meurt)
+# ---------------------------------------------------------------------------
+_mutex_handle = None
+
+
+def acquire_single_instance():
+    global _mutex_handle
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        _mutex_handle = kernel32.CreateMutexW(None, False, "Local\\LiveChatOverlayMemeMutex")
+        already_running = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+        return not already_running
+    except Exception:
+        log("Mutex impossible : " + traceback.format_exc())
+        return True
+
+
+# ---------------------------------------------------------------------------
+# FENETRE DE CONFIGURATION DU PSEUDO
+# ---------------------------------------------------------------------------
+class SetupDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.pseudo = None
@@ -29,13 +107,13 @@ class SetupDialog(QWidget):
         self.setStyleSheet("background-color: #2b2d31; color: white; font-family: 'Segoe UI';")
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
-        
+
         saved_pseudo = ""
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     saved_pseudo = f.read().strip()
-            except:
+            except Exception:
                 pass
 
         label = QLabel("Entre ton pseudo Discord exact :", self)
@@ -44,11 +122,16 @@ class SetupDialog(QWidget):
 
         self.input_field = QLineEdit(self)
         self.input_field.setText(saved_pseudo)
-        self.input_field.setStyleSheet("padding: 8px; font-size: 14px; background: #1e1f22; border: 1px solid #383a40; border-radius: 4px; color: white;")
+        self.input_field.setStyleSheet(
+            "padding: 8px; font-size: 14px; background: #1e1f22; border: 1px solid #383a40; "
+            "border-radius: 4px; color: white;")
+        self.input_field.returnPressed.connect(self.validate)
         layout.addWidget(self.input_field)
 
         btn = QPushButton("Lancer l'Overlay", self)
-        btn.setStyleSheet("margin-top: 10px; padding: 8px; font-size: 14px; background: #5865F2; color: white; border: none; border-radius: 4px; font-weight: bold;")
+        btn.setStyleSheet(
+            "margin-top: 10px; padding: 8px; font-size: 14px; background: #5865F2; color: white; "
+            "border: none; border-radius: 4px; font-weight: bold;")
         btn.clicked.connect(self.validate)
         layout.addWidget(btn)
 
@@ -59,9 +142,10 @@ class SetupDialog(QWidget):
             try:
                 with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                     f.write(text)
-            except:
+            except Exception:
                 pass
-            self.hide()
+            self.accept()
+
 
 def create_discord_avatar_with_ring(pixmap, size=40):
     total_size = size + 8
@@ -80,64 +164,67 @@ def create_discord_avatar_with_ring(pixmap, size=40):
     painter.end()
     return result
 
+
+# ---------------------------------------------------------------------------
+# OVERLAY
+# ---------------------------------------------------------------------------
 class OverlayWindow(QWidget):
+    # Signaux : seul moyen fiable de parler à l'interface depuis le thread réseau
+    media_ready = pyqtSignal(dict)
+    hide_requested = pyqtSignal()
+    quit_requested = pyqtSignal()
+
     def __init__(self, discord_pseudo):
         super().__init__()
         self.discord_pseudo = discord_pseudo
-        self.video_file = None
+        self.video_path = None
         self.current_loaded_url = None
-        self.is_transitioning = False
+        self.last_done_url = None
         self.is_clearing = False
         self.current_max_size = 850
-        
+
+        self.media_ready.connect(self.handle_new_media)
+        self.hide_requested.connect(self.hide_overlay_ui)
+
         self.float_angle = 0.0
         self.float_timer = QTimer(self)
         self.float_timer.timeout.connect(self.animate_floating_header)
         self.float_timer.start(30)
-        
+
         self.init_ui()
         self.init_network()
 
     def init_ui(self):
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
+        # Fenêtre sans bord, au premier plan, transparente, et "traversable" à la souris
+        # (Qt.WindowTransparentForInput remplace l'ancien bricolage ctypes)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.resize(1920, 1080)
-        self.move(0, 0)
-
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style | 0x80000 | 0x20 | 0x8)
-        except Exception as e:
-            print(f"Erreur style Windows layer : {e}")
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+        log(f"Taille de l'overlay : {screen.width()}x{screen.height()}")
 
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(40, 0, 40, 0)
-        
+
         self.container = QWidget(self)
         container_layout = QVBoxLayout(self.container)
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
-        
-        self.opacity_effect = QGraphicsOpacityEffect(self.container)
-        self.container.setGraphicsEffect(self.opacity_effect)
-        self.opacity_effect.setOpacity(1.0)
 
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
         header_layout.setSpacing(10)
-        
+
         self.avatar_label = QLabel(self.header_widget)
         header_layout.addWidget(self.avatar_label)
-        
+
         self.author_label = QLabel(self.header_widget)
         self.author_label.setAlignment(Qt.AlignCenter)
         self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
         self.author_label.setStyleSheet("color: white;")
-        
         shadow_pseudo = QGraphicsDropShadowEffect()
         shadow_pseudo.setBlurRadius(3)
         shadow_pseudo.setColor(QColor(0, 0, 0, 255))
@@ -145,7 +232,7 @@ class OverlayWindow(QWidget):
         self.author_label.setGraphicsEffect(shadow_pseudo)
         header_layout.addWidget(self.author_label)
         container_layout.addWidget(self.header_widget)
-        
+
         self.image_label = QLabel(self.container)
         self.image_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.image_label)
@@ -155,10 +242,10 @@ class OverlayWindow(QWidget):
         self.graphics_view.setStyleSheet("background: transparent; border: none;")
         self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
+
         self.scene = QGraphicsScene(self.graphics_view)
         self.graphics_view.setScene(self.scene)
-        
+
         self.video_item = QGraphicsVideoItem()
         self.scene.addItem(self.video_item)
         self.video_item.setSize(QRectF(0, 0, 850, 480).size())
@@ -168,7 +255,10 @@ class OverlayWindow(QWidget):
 
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
         self.media_player.setVideoOutput(self.video_item)
-        self.media_player.stateChanged.connect(self.media_state_changed)
+        # IMPORTANT : EndOfMedia est un "mediaStatus", pas un "state".
+        # L'ancien code utilisait stateChanged -> la fin de vidéo n'était jamais détectée.
+        self.media_player.mediaStatusChanged.connect(self.on_media_status)
+        self.media_player.error.connect(self.on_media_error)
 
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
@@ -176,14 +266,13 @@ class OverlayWindow(QWidget):
         self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
         self.text_label.setStyleSheet("color: white;")
         self.text_label.setMaximumWidth(850)
-        
         shadow_text = QGraphicsDropShadowEffect()
         shadow_text.setBlurRadius(3)
         shadow_text.setColor(QColor(0, 0, 0, 255))
         shadow_text.setOffset(1, 1)
         self.text_label.setGraphicsEffect(shadow_text)
         container_layout.addWidget(self.text_label)
-        
+
         self.main_layout.addStretch(1)
         self.main_layout.addWidget(self.container)
         self.main_layout.addStretch(1)
@@ -193,6 +282,23 @@ class OverlayWindow(QWidget):
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
 
+    # ---- petit message de test au démarrage -------------------------------
+    def show_notice(self, text, ms=4000):
+        self.author_label.clear()
+        self.avatar_label.hide()
+        self.image_label.hide()
+        self.graphics_view.hide()
+        self.text_label.setText(text)
+        self.text_label.show()
+        self.container.show()
+        self.raise_()
+        QTimer.singleShot(ms, self._end_notice)
+
+    def _end_notice(self):
+        if self.current_loaded_url is None:
+            self.text_label.clear()
+            self.container.hide()
+
     def animate_floating_header(self):
         if self.container.isVisible():
             self.float_angle += 0.08
@@ -201,10 +307,7 @@ class OverlayWindow(QWidget):
 
     def update_alignment(self, position):
         while self.main_layout.count():
-            item = self.main_layout.takeAt(0)
-            if item.widget() and item.widget() != self.container:
-                item.widget().deleteLater()
-            
+            self.main_layout.takeAt(0)
         if position == "left":
             self.main_layout.addWidget(self.container)
             self.main_layout.addStretch(1)
@@ -216,76 +319,128 @@ class OverlayWindow(QWidget):
             self.main_layout.addWidget(self.container)
             self.main_layout.addStretch(1)
 
+    # ---- réseau (thread séparé) -------------------------------------------
     def init_network(self):
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
 
+    @staticmethod
+    def _is_inactive(data):
+        status = data.get("status")
+        if isinstance(status, str) and status.lower() in ("inactive", "off", "disabled", "stopped"):
+            return True
+        if status is False or data.get("active") is False:
+            return True
+        return False
+
+    def request_quit(self, reason):
+        log("Fermeture demandée : " + reason)
+        self.quit_requested.emit()
+        # filet de sécurité : si la fermeture propre traîne, on tue le process
+        threading.Timer(5, lambda: os._exit(0)).start()
+
     def network_worker(self):
+        session = requests.Session()
+        last_logged = None
+        last_err = None
+        count_404 = 0
+        fail_url = None
+        fail_count = 0
+
         while True:
             try:
-                url_query = f"{SERVER_URL}?user={requests.utils.quote(self.discord_pseudo)}"
-                res = requests.get(url_query, timeout=3)
-                
-                if res.status_code == 200:
-                    data = res.json()
-                    
-                    # Sécurité large pour détecter l'inactivité (statut explicitement inactif ou données vides/absentes)
-                    status = data.get("status")
-                    if status == "inactive" or status == False or data.get("active") == False:
-                        if os.path.exists(LOCK_FILE):
-                            try:
-                                os.remove(LOCK_FILE)
-                            except:
-                                pass
-                        os._exit(0)
+                res = session.get(SERVER_URL, params={"user": self.discord_pseudo}, timeout=10)
 
-                    new_url = data.get("url")
-                    if not new_url:
-                        if self.current_loaded_url is not None:
-                            self.current_loaded_url = None
-                            QTimer.singleShot(0, self.hide_overlay_ui)
-                        time.sleep(1.5)
-                        continue
-
-                    elif new_url != self.current_loaded_url and not self.is_transitioning:
-                        self.is_transitioning = True
-                        self.current_loaded_url = new_url
-                        
-                        media_res = requests.get(new_url, timeout=15)
-                        if media_res.status_code == 200:
-                            data["content_bytes"] = media_res.content
-                            avatar_url = data.get("avatar", "")
-                            if avatar_url:
-                                try:
-                                    ar = requests.get(avatar_url, timeout=3)
-                                    if ar.status_code == 200:
-                                        data["avatar_bytes"] = ar.content
-                                except:
-                                    pass
-                            QTimer.singleShot(0, lambda d=data: self.handle_new_media(d))
-                        else:
-                            self.is_transitioning = False
-                    else:
-                        time.sleep(1.5)
-                elif res.status_code == 404:
-                    # Si l'utilisateur n'est plus trouvé sur le serveur, on ferme tout net
-                    if os.path.exists(LOCK_FILE):
-                        try:
-                            os.remove(LOCK_FILE)
-                        except:
-                            pass
-                    os._exit(0)
-                else:
+                if res.status_code == 404:
+                    count_404 += 1
+                    if count_404 >= 3:
+                        self.request_quit("le serveur répond 404 (3 fois de suite)")
+                        return
                     time.sleep(1.5)
+                    continue
+                count_404 = 0
+
+                if res.status_code != 200:
+                    msg = f"HTTP {res.status_code} du serveur"
+                    if msg != last_err:
+                        log(msg)
+                        last_err = msg
+                    time.sleep(2)
+                    continue
+                last_err = None
+
+                data = res.json()
+                summary = json.dumps(data, ensure_ascii=False)[:300]
+                if summary != last_logged:
+                    log("Réponse serveur : " + summary)
+                    last_logged = summary
+
+                if self._is_inactive(data):
+                    self.request_quit("le serveur dit que le live chat est inactif")
+                    return
+
+                new_url = data.get("url")
+                if not new_url:
+                    self.last_done_url = None
+                    if self.current_loaded_url is not None:
+                        self.current_loaded_url = None
+                        self.hide_requested.emit()
+                    time.sleep(1.5)
+                    continue
+
+                if new_url == self.last_done_url or new_url == self.current_loaded_url:
+                    time.sleep(1.5)
+                    continue
+
+                # nouveau média à afficher
+                self.current_loaded_url = new_url
+                try:
+                    media_res = session.get(new_url, timeout=20)
+                    if media_res.status_code != 200:
+                        raise RuntimeError(f"téléchargement du média : HTTP {media_res.status_code}")
+                    data["content_bytes"] = media_res.content
+                    data["content_type"] = media_res.headers.get("Content-Type", "")
+                    log(f"Média téléchargé ({len(media_res.content)} octets, {data['content_type']})")
+
+                    avatar_url = data.get("avatar", "")
+                    if avatar_url:
+                        try:
+                            ar = session.get(avatar_url, timeout=5)
+                            if ar.status_code == 200:
+                                data["avatar_bytes"] = ar.content
+                        except Exception:
+                            pass
+                    fail_url, fail_count = None, 0
+                    self.media_ready.emit(data)
+                except Exception as e:
+                    log(f"Échec média : {e}")
+                    self.current_loaded_url = None
+                    if fail_url == new_url:
+                        fail_count += 1
+                    else:
+                        fail_url, fail_count = new_url, 1
+                    if fail_count >= 3:
+                        log("Média abandonné après 3 échecs, on le passe")
+                        self.last_done_url = new_url
+                        self._send_pop_request()
+                        fail_url, fail_count = None, 0
+                    time.sleep(2)
+
             except Exception as e:
+                msg = f"Erreur réseau : {e}"
+                if msg != last_err:
+                    log(msg)
+                    last_err = msg
                 time.sleep(2)
 
+    # ---- affichage (thread interface) -------------------------------------
     def handle_new_media(self, data):
         try:
+            self.is_clearing = False
             self.media_player.stop()
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
-            
+
             if is_game_mode:
                 self.current_max_size = 380
                 self.graphics_view.setFixedSize(380, 215)
@@ -312,7 +467,7 @@ class OverlayWindow(QWidget):
 
             author = data.get("name", "")
             meme_txt = data.get("content", "")
-            
+
             if meme_txt:
                 self.text_label.setText(meme_txt)
                 self.text_label.show()
@@ -333,35 +488,34 @@ class OverlayWindow(QWidget):
                 self.avatar_label.hide()
 
             content = data.get("content_bytes")
-            is_vid = any(ext in url.lower() for ext in [".mp4", ".mov", ".webm", ".avi"])
+            path = urlparse(url).path.lower()
+            ctype = (data.get("content_type") or "").lower()
+            is_vid = ctype.startswith("video/") or path.endswith(VIDEO_EXTS)
 
             if is_vid:
                 self.image_label.hide()
                 self.graphics_view.show()
-
-                if self.video_file and os.path.exists(self.video_file.name):
-                    try:
-                        self.video_file.close()
-                        os.remove(self.video_file.name)
-                    except:
-                        pass
+                self._cleanup_video_file()
 
                 suffix = ".mp4"
-                for ext in [".webm", ".mov", ".avi", ".mp4"]:
-                    if ext in url.lower():
+                for ext in VIDEO_EXTS:
+                    if path.endswith(ext):
                         suffix = ext
                         break
 
-                self.video_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                self.video_file.write(content)
-                self.video_file.flush()
-                self.video_file.close()
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                tmp.write(content)
+                tmp.flush()
+                tmp.close()
+                self.video_path = tmp.name
+                log(f"Lecture vidéo : {self.video_path}")
 
-                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
+                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_path)))
                 self.container.show()
                 self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
-                self.close_timer.stop()
+                # filet de sécurité : si la vidéo ne se termine jamais, on la coupe après 5 min
+                self.close_timer.start(300000)
             else:
                 self.graphics_view.hide()
                 self.image_label.show()
@@ -369,35 +523,56 @@ class OverlayWindow(QWidget):
                 image = QImage.fromData(content)
                 pixmap = QPixmap.fromImage(image)
                 if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
-                    pixmap = pixmap.scaled(self.current_max_size, self.current_max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                
+                    pixmap = pixmap.scaled(self.current_max_size, self.current_max_size,
+                                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.image_label.setPixmap(pixmap)
                 self.container.show()
                 self.raise_()
                 self.close_timer.start(7000)
-        except Exception as e:
-            self.hide_overlay_ui()
-        finally:
-            self.is_transitioning = False
-
-    def media_state_changed(self, state):
-        if state == QMediaPlayer.EndOfMedia:
+        except Exception:
+            log("Erreur dans handle_new_media :\n" + traceback.format_exc())
             self.finish_media_playback()
 
+    def on_media_status(self, status):
+        if status == QMediaPlayer.EndOfMedia:
+            log("Fin de la vidéo")
+            self.finish_media_playback()
+        elif status == QMediaPlayer.InvalidMedia:
+            log("Vidéo invalide : codec manquant sur ce PC ?")
+            QTimer.singleShot(1500, self.finish_media_playback)
+
+    def on_media_error(self, err):
+        log(f"Erreur du lecteur vidéo : {err} - {self.media_player.errorString()}")
+        QTimer.singleShot(1500, self.finish_media_playback)
+
     def finish_media_playback(self):
-        if self.is_clearing:
+        if self.is_clearing or self.current_loaded_url is None:
             return
         self.is_clearing = True
+        self.close_timer.stop()
+        self.last_done_url = self.current_loaded_url
         threading.Thread(target=self._send_pop_request, daemon=True).start()
         self.hide_overlay_ui()
 
     def _send_pop_request(self):
         try:
-            requests.post(f"{POP_URL}?user={requests.utils.quote(self.discord_pseudo)}", timeout=3)
-        except:
-            pass
+            requests.post(POP_URL, params={"user": self.discord_pseudo}, timeout=5)
+        except Exception as e:
+            log(f"Erreur pop_meme : {e}")
+
+    def _cleanup_video_file(self):
+        if self.video_path:
+            try:
+                self.media_player.stop()
+                self.media_player.setMedia(QMediaContent())  # libère le fichier sous Windows
+                if os.path.exists(self.video_path):
+                    os.remove(self.video_path)
+            except Exception:
+                pass
+            self.video_path = None
 
     def hide_overlay_ui(self):
+        self.close_timer.stop()
         self.media_player.stop()
         self.image_label.clear()
         self.graphics_view.hide()
@@ -406,80 +581,47 @@ class OverlayWindow(QWidget):
         self.avatar_label.clear()
         self.text_label.clear()
         self.container.hide()
-        
-        if self.video_file and os.path.exists(self.video_file.name):
-            try:
-                self.video_file.close()
-                os.remove(self.video_file.name)
-            except:
-                pass
-            self.video_file = None
-
+        self._cleanup_video_file()
         self.current_loaded_url = None
-        QTimer.singleShot(500, lambda: setattr(self, 'is_transitioning', False))
         self.is_clearing = False
+
+    def cleanup(self):
+        self._cleanup_video_file()
+
 
 def main():
     app = QApplication(sys.argv)
-    
-    if os.path.exists(LOCK_FILE):
-        try:
-            if time.time() - os.path.getmtime(LOCK_FILE) > 10:
-                os.remove(LOCK_FILE)
-        except:
-            pass
+    app.setQuitOnLastWindowClosed(False)
 
-    if os.path.exists(LOCK_FILE):
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("Live Chat déjà actif")
-        msg.setText("Le live chat est déjà actif sur le PC !")
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
-        sys.exit(0)
-        
-    lock_fd = None
+    if not acquire_single_instance():
+        log("Une autre instance tourne déjà")
+        QMessageBox.warning(None, "Live Chat déjà actif", "Le live chat est déjà actif sur le PC !")
+        return 0
+
+    # nettoyage de l'ancien système de lock par fichier
     try:
-        lock_fd = open(LOCK_FILE, "w")
-        lock_fd.write("locked")
-        lock_fd.flush()
-    except:
+        if os.path.exists(OLD_LOCK_FILE):
+            os.remove(OLD_LOCK_FILE)
+    except Exception:
         pass
 
     setup = SetupDialog()
-    setup.show()
-    app.exec_()
-    
+    setup.exec_()
     if not setup.pseudo:
-        if lock_fd:
-            try:
-                lock_fd.close()
-            except:
-                pass
-        if os.path.exists(LOCK_FILE):
-            try:
-                os.remove(LOCK_FILE)
-            except:
-                pass
-        sys.exit(0)
+        log("Configuration fermée sans pseudo")
+        return 0
 
+    log(f"Pseudo : {setup.pseudo}")
     overlay = OverlayWindow(setup.pseudo)
+    overlay.quit_requested.connect(app.quit)
     overlay.show()
-    
-    exit_code = app.exec_()
-    
-    if lock_fd:
-        try:
-            lock_fd.close()
-        except:
-            pass
-    if os.path.exists(LOCK_FILE):
-        try:
-            os.remove(LOCK_FILE)
-        except:
-            pass
-            
-    sys.exit(exit_code)
+    overlay.show_notice("Overlay connecté ✅", 4000)
+
+    code = app.exec_()
+    overlay.cleanup()
+    log("=== Arrêt propre ===")
+    return code
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

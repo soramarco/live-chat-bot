@@ -508,6 +508,9 @@ class OverlayWindow(QWidget):
         self.is_clearing = False
         self.current_max_size = 850
         self._video_frames_shown = 0
+        self._video_frames_received = 0
+        self._video_box_size = QSize(850, 480)
+        self._last_video_source_size = QSize()
         self._fade_animations = []
         self.current_position = None
         self.current_game_mode = None
@@ -556,12 +559,16 @@ class OverlayWindow(QWidget):
         self.image_label = FrameDisplayWidget(self.container, fixed_box=False)
         container_layout.addWidget(self.image_label, 0, Qt.AlignCenter)
 
-        # Pour la vidéo, utiliser un vrai QLabel/QPixmap. Le widget peint à la
-        # main avec CompositionMode_Source causait une disparition des frames
-        # dans la fenêtre translucide sous Windows (l'audio continuait pourtant).
+        # La vidéo est dessinée dans une zone aux dimensions exactes de son ratio.
+        # En mode normal, cette zone possède un fond opaque : sur une fenêtre
+        # plein écran translucide Windows, un QLabel transparent peut composer
+        # ses pixels en semi-transparence (visible seulement au screenshot).
+        # En mode jeu, on conserve le rendu compact déjà fonctionnel.
         self.video_label = QLabel(self.container)
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setStyleSheet("background: transparent; border: none;")
+        self.video_label.setAutoFillBackground(True)
+        self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.video_label.setStyleSheet("background-color: #000000; border: none;")
         self.video_label.setFixedSize(850, 480)
         container_layout.addWidget(self.video_label, 0, Qt.AlignCenter)
         self.video_label.hide()
@@ -904,6 +911,10 @@ class OverlayWindow(QWidget):
         self.current_position = position
         self.current_game_mode = is_game_mode
         if is_game_mode:
+            # Ne pas modifier le rendu en mode jeu : il fonctionne déjà chez toi.
+            self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, False)
+            self.video_label.setStyleSheet("background: transparent; border: none;")
+            self.video_label.setAutoFillBackground(False)
             self.current_max_size = 380
             self.set_video_box(380, 215)
             header_font = QFont("Segoe UI", 13, QFont.Bold)
@@ -911,6 +922,12 @@ class OverlayWindow(QWidget):
             self.text_label.setMaximumWidth(380)
             avatar_size = 26
         else:
+            # En mode normal, rendre le widget vidéo réellement opaque et ajuster
+            # sa géométrie au ratio du média : pas de grande zone transparente
+            # autour d'une vidéo portrait, ni de pixmap superposé hors de sa zone.
+            self.video_label.setAutoFillBackground(True)
+            self.video_label.setAttribute(Qt.WA_OpaquePaintEvent, True)
+            self.video_label.setStyleSheet("background-color: #000000; border: none;")
             self.current_max_size = 850
             self.set_video_box(850, 480)
             header_font = QFont("Segoe UI", 20, QFont.Bold)
@@ -983,9 +1000,13 @@ class OverlayWindow(QWidget):
             is_vid = is_video_media(url, ctype, content)
 
             if is_vid:
+                # Vider l'image précédente avant d'afficher la vidéo afin d'éviter
+                # que le backing store transparent conserve une ancienne image.
+                self.image_label.clear()
                 self.image_label.hide()
                 self.video_label.clear()
                 self.video_label.show()
+                self._video_frames_shown = 0
                 self._cleanup_video_file()
 
                 suffix = infer_video_suffix(url, ctype, content)
@@ -1025,52 +1046,89 @@ class OverlayWindow(QWidget):
             self.finish_media_playback()
 
     def set_video_box(self, w, h):
-        self.video_label.setFixedSize(w, h)
-        self.video_surface.target_size = (w, h)
+        """Définit les dimensions maximales du cadre vidéo."""
+        self._video_box_size = QSize(int(w), int(h))
+        self.video_surface.target_size = (int(w), int(h))
+        if self.current_game_mode:
+            # Le format compact du mode jeu est laissé inchangé.
+            self.video_label.setFixedSize(int(w), int(h))
+        elif not self._last_video_source_size.isEmpty():
+            fitted = self._last_video_source_size.scaled(self._video_box_size, Qt.KeepAspectRatio)
+            self.video_label.setFixedSize(fitted)
+        else:
+            self.video_label.setFixedSize(int(w), int(h))
 
     def on_video_frame(self, img):
         if self.current_loaded_url is None or img is None or img.isNull():
             return
         try:
-            # Toujours rendre la frame à la taille maximale disponible du QLabel,
-            # en conservant son ratio. En mode jeu, cela réduit les vidéos au cadre
-            # compact ; en mode normal, cela AGRANDIT aussi les frames plus petites
-            # (par ex. 638x360 vers 850x480). Le comportement précédent ne réduisait
-            # que les grandes frames : certaines vidéos paysage restaient en pixmap
-            # sous-dimensionné dans la fenêtre translucide et n'étaient pas composées
-            # correctement par Windows, alors que les mêmes vidéos fonctionnaient
-            # en mode jeu car elles étaient forcément redimensionnées.
-            box = self.video_label.size()
-            if box.width() <= 0 or box.height() <= 0:
+            # Détacher du buffer Qt et forcer RGB32 : chaque pixel vidéo est
+            # opaque. Cela évite que l'alpha du QVideoFrame ne mélange la vidéo
+            # avec Discord/le bureau via la fenêtre translucide de l'overlay.
+            frame = img.convertToFormat(QImage.Format_RGB32).copy()
+            if frame.isNull():
+                log("Image vidéo reçue mais copie RGB32 impossible")
                 return
-            target = img.size().scaled(box, Qt.KeepAspectRatio)
-            if target.isEmpty():
-                return
-            frame = img.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            pixmap = QPixmap.fromImage(frame)
+            self._last_video_source_size = frame.size()
+            self._video_frames_received += 1
+
+            if self.current_game_mode:
+                # Mode jeu : garder strictement le cadre compact qui fonctionne.
+                box = self._video_box_size
+                target = frame.size().scaled(box, Qt.KeepAspectRatio)
+                if target.isEmpty():
+                    return
+                display_frame = frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            else:
+                # Mode normal : la fenêtre vidéo est de la même taille que l'image
+                # ajustée dans la boîte maximale 850x480 (portrait => 270x480,
+                # panorama large => largeur 850 avec hauteur adaptée). Ainsi le
+                # QLabel opaque ne laisse pas une grande surface transparente
+                # sur laquelle Windows pourrait réafficher des pixels précédents.
+                target = frame.size().scaled(self._video_box_size, Qt.KeepAspectRatio)
+                if target.isEmpty():
+                    return
+                if self.video_label.size() != target:
+                    old_size = self.video_label.size()
+                    self.video_label.setFixedSize(target)
+                    self.container.adjustSize()
+                    self.main_layout.activate()
+                    # Effacer les anciennes limites de l'overlay après changement
+                    # de ratio (notamment paysage -> portrait) avant le dessin.
+                    self.update()
+                    log(f"Cadre vidéo normal redimensionné : {old_size.width()}x{old_size.height()} "
+                        f"-> {target.width()}x{target.height()}")
+                display_frame = frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+            pixmap = QPixmap.fromImage(display_frame)
             if pixmap.isNull():
                 log("Image vidéo reçue mais conversion en QPixmap impossible")
                 return
-            if self.video_label.pixmap() is None:
-                self.video_label.clear()
             if self.video_label.isHidden():
                 self.video_label.show()
             self.video_label.setPixmap(pixmap)
-            # En mode normal, forcer l'actualisation de la surface translucide
-            # de la fenêtre Windows plutôt que d'attendre un repaint externe
-            # (les captures d'écran semblaient déclencher le rafraîchissement).
-            if not self.current_game_mode:
-                self.video_label.repaint()
-            else:
-                self.video_label.update()
+            self.video_label.update()
+            # Seule la zone vidéo opaque est repeinte, et non toute la fenêtre
+            # transparente. Le rendu du média n'a pas de fondu d'opacité.
+            self.video_label.repaint()
             self._video_frames_shown += 1
             if self._video_frames_shown == 1:
-                log(f"Première image envoyée au QLabel natif : source={img.width()}x{img.height()}, "
-                    f"affichage={pixmap.width()}x{pixmap.height()}, "
+                log(f"Première image vidéo affichée : source={img.width()}x{img.height()}, "
+                    f"format={display_frame.width()}x{display_frame.height()}, "
                     f"zone={self.video_label.width()}x{self.video_label.height()}, "
-                    f"mode_jeu={self.current_game_mode}, visible={self.video_label.isVisible()}")
+                    f"mode_jeu={self.current_game_mode}, "
+                    f"alpha_centre={(display_frame.pixel(display_frame.width()//2, display_frame.height()//2) >> 24) & 0xff}")
         except Exception:
             log("Erreur d'affichage d'une frame vidéo :\n" + traceback.format_exc())
+
+    def paintEvent(self, event):
+        # Le top-level est une fenêtre transparente plein écran. Effacer sa zone
+        # en alpha=0 à chaque vrai repaint empêche de garder des fragments dans
+        # le backing store après qu'un QLabel vidéo a changé de dimensions.
+        painter = QPainter(self)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(event.rect(), QColor(0, 0, 0, 0))
+        painter.end()
 
     def on_media_status(self, status):
         if status == QMediaPlayer.EndOfMedia:

@@ -99,7 +99,7 @@ class SetupDialog(QWidget):
                     f.write(text)
             except:
                 pass
-            self.close()
+            self.hide()
 
 def create_discord_avatar_with_ring(pixmap, size=40):
     total_size = size + 8
@@ -145,7 +145,6 @@ class OverlayWindow(QWidget):
         self.is_transitioning = False
         self.current_max_size = 850
         
-        # Timer pour l'effet de lévitation fluide sur l'en-tête (Avatar + Pseudo)
         self.float_angle = 0.0
         self.float_timer = QTimer(self)
         self.float_timer.timeout.connect(self.animate_floating_header)
@@ -181,7 +180,6 @@ class OverlayWindow(QWidget):
         self.container.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
 
-        # En-tête regroupant l'Avatar et le Pseudo
         self.header_widget = QWidget(self.container)
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setAlignment(Qt.AlignCenter)
@@ -243,7 +241,6 @@ class OverlayWindow(QWidget):
         self.video_timer.timeout.connect(self.update_video_frame)
 
     def animate_floating_header(self):
-        # Mouvement d'oscillation verticale fluide limité à l'en-tête (Avatar + Pseudo)
         if self.container.isVisible():
             self.float_angle += 0.08
             offset_y = int(math.sin(self.float_angle) * 3)
@@ -290,14 +287,11 @@ class OverlayWindow(QWidget):
                         continue
                     
                     if data.get("status") == "inactive":
-                        print("[NETWORK] Statut inactif reçu, fermeture.")
+                        print("[NETWORK] Statut inactif reçu du bot, fermeture immédiate.")
                         self.signals.force_close.emit()
                         break
 
                     new_url = data.get("url")
-
-                    if new_url:
-                        print(f"[NETWORK] Média détecté par l'API : {new_url}")
 
                     if not new_url:
                         if self.current_loaded_url is not None:
@@ -382,7 +376,7 @@ class OverlayWindow(QWidget):
             else:
                 self.text_label.hide()
 
-            self.author_label.setText(f"{author}")
+            self.author_label.setText(str(author))
             self.author_label.show()
 
             avatar_bytes = data.get("avatar_bytes")
@@ -468,19 +462,6 @@ class OverlayWindow(QWidget):
     def update_video_frame(self):
         if not (self.video_capture and self.video_capture.isOpened()):
             return
-
-        if self.media_player.state() == QMediaPlayer.PlayingState:
-            pos_ms = self.media_player.position()
-            target_frame = int((pos_ms / 1000.0) * self.fps)
-            current_frame = int(self.video_capture.get(cv2.CAP_PROP_POS_FRAMES))
-
-            while current_frame < target_frame - 1:
-                if not self.video_capture.grab():
-                    break
-                current_frame += 1
-
-            if current_frame > target_frame + 1:
-                return
 
         ret, frame = self.video_capture.read()
         if ret:

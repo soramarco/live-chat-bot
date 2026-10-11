@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-11-frame-display-widget-v1")
+log("CORE_BUILD_ID=2026-10-11-native-opaque-video-v1")
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
@@ -496,6 +496,57 @@ class FrameSurface(QAbstractVideoSurface):
         return True
 
 # ---------------------------------------------------------------------------
+# FENETRE VIDEO NATIVE OPAQUE
+# ---------------------------------------------------------------------------
+class OpaqueVideoWindow(QWidget):
+    """Fenêtre native opaque indépendante du canvas translucide plein écran.
+
+    Sous Windows, certaines combinaisons QWidget enfant + WA_TranslucentBackground
+    peuvent livrer des frames valides (alpha 255) que DWM compose mal. La vidéo
+    est donc dessinée dans son propre HWND opaque, à la position du placeholder.
+    """
+    def __init__(self):
+        flags = (Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool |
+                 Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
+        super().__init__(None, flags)
+        self._frame = QImage()
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WA_NativeWindow, True)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("background-color: #000000; border: none;")
+        self.hide()
+
+    def show_frame(self, frame, geometry):
+        if frame is None or frame.isNull() or geometry.width() <= 0 or geometry.height() <= 0:
+            self.clear_frame()
+            return
+        self._frame = frame.convertToFormat(QImage.Format_RGB32).copy()
+        # Positionne et redimensionne la fenêtre au rectangle exact du média.
+        if self.geometry() != geometry:
+            self.setGeometry(geometry)
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.update()
+        self.repaint()
+
+    def clear_frame(self):
+        self._frame = QImage()
+        self.hide()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(event.rect(), QColor(0, 0, 0, 255))
+        if not self._frame.isNull():
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.drawImage(self.rect(), self._frame)
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
 # OVERLAY
 # ---------------------------------------------------------------------------
 class OverlayWindow(QWidget):
@@ -586,8 +637,12 @@ class OverlayWindow(QWidget):
         # fenêtre translucide plein écran, source probable de l'image fantôme.
         self.video_canvas = FrameDisplayWidget(self.container, fixed_box=False)
         self.video_canvas.setFixedSize(850, 480)
+        # En mode normal, ce widget est seulement un placeholder transparent
+        # dans le layout. Les pixels réels sont affichés par video_window,
+        # une fenêtre native opaque au-dessus du bureau.
         container_layout.addWidget(self.video_canvas, 0, Qt.AlignCenter)
         self.video_canvas.hide()
+        self.video_window = OpaqueVideoWindow()
 
         self.video_surface = FrameSurface(self)
         self.video_surface.frame_ready.connect(self.on_video_frame)
@@ -654,6 +709,7 @@ class OverlayWindow(QWidget):
         self.image_label.hide()
         self.video_label.hide()
         self.video_canvas.hide()
+        self.video_window.clear_frame()
         self.text_label.setText(text)
         self.text_label.show()
         self.container.show()
@@ -935,7 +991,7 @@ class OverlayWindow(QWidget):
                 self._network_active_key = None
 
     def _render_video_frame_for_mode(self, source_frame):
-        """Conserve le renderer jeu; en mode normal, peint les frames comme les images fixes."""
+        """Mode jeu : chemin QLabel historique ; mode normal : fenêtre opaque native."""
         if source_frame is None or source_frame.isNull():
             return
         frame = source_frame.convertToFormat(QImage.Format_RGB32).copy()
@@ -944,16 +1000,18 @@ class OverlayWindow(QWidget):
             return
 
         box = self._video_box_size
+        target = frame.size().scaled(box, Qt.KeepAspectRatio)
+        if target.isEmpty():
+            return
+        display_frame = frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
         if self.current_game_mode:
-            # Mode jeu : ancien chemin QLabel gardé tel quel, car il fonctionne.
+            # Mode jeu : on garde le chemin QLabel qui fonctionne chez toi.
+            self.video_window.clear_frame()
             if not self.video_canvas.isHidden():
                 self.video_canvas.clear()
                 self.video_canvas.hide()
             self.video_label.setFixedSize(box)
-            target = frame.size().scaled(box, Qt.KeepAspectRatio)
-            if target.isEmpty():
-                return
-            display_frame = frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             pixmap = QPixmap.fromImage(display_frame)
             if pixmap.isNull():
                 return
@@ -962,34 +1020,38 @@ class OverlayWindow(QWidget):
             self.video_label.setPixmap(pixmap)
             self.video_label.update()
             self.video_label.repaint()
-        else:
-            # Mode normal : FrameDisplayWidget, exactement comme pour les photos.
-            # La surface épouse la taille de l'image ajustée (par ex. 850x480 paysage,
-            # 270x480 portrait) et chaque frame opaque remplace toute sa zone. Cela
-            # évite le QLabel dans la fenêtre translucide et limite les zones fantômes.
-            if not self.video_label.isHidden():
-                self.video_label.clear()
-                self.video_label.hide()
+            return
 
-            target = frame.size().scaled(box, Qt.KeepAspectRatio)
-            if target.isEmpty():
-                return
-            display_frame = frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-            if self.video_canvas.size() != target:
-                old_size = self.video_canvas.size()
-                # Effacer à l'ancienne géométrie avant de la changer, pour qu'une
-                # vidéo de format différent ne laisse pas son ancien rectangle.
-                self.video_canvas.clear()
-                self.video_canvas.setFixedSize(target)
-                self.container.adjustSize()
-                if self.container.layout() is not None:
-                    self.container.layout().activate()
-                self.main_layout.activate()
-                log(f"Canvas vidéo normal redimensionné : {old_size.width()}x{old_size.height()} "
-                    f"-> {target.width()}x{target.height()}")
-            if self.video_canvas.isHidden():
-                self.video_canvas.show()
-            self.video_canvas.setImage(display_frame)
+        # Mode normal : ne dessine PAS la vidéo dans un enfant de la fenêtre
+        # WA_TranslucentBackground. On ne garde ici qu'un placeholder transparent
+        # de la bonne taille pour que la mise en page conserve header / média / texte.
+        if not self.video_label.isHidden():
+            self.video_label.clear()
+            self.video_label.hide()
+        if not self.video_canvas.isHidden():
+            self.video_canvas.clear()
+        if self.video_canvas.size() != target:
+            old_size = self.video_canvas.size()
+            self.video_canvas.clear()
+            self.video_canvas.setFixedSize(target)
+            log(f"Canvas placeholder normal redimensionné : {old_size.width()}x{old_size.height()} "
+                f"-> {target.width()}x{target.height()}")
+        if self.video_canvas.isHidden():
+            self.video_canvas.show()
+        self.container.adjustSize()
+        if self.container.layout() is not None:
+            self.container.layout().activate()
+        self.main_layout.activate()
+
+        top_left = self.video_canvas.mapToGlobal(QPoint(0, 0))
+        geometry = QRect(top_left, target)
+        self.video_window.show_frame(display_frame, geometry)
+        log_once_key = "_opaque_video_window_logged"
+        if not getattr(self, log_once_key, False):
+            setattr(self, log_once_key, True)
+            log(f"VIDEO_WINDOW_NATIVE_TEST: géométrie={geometry.x()},{geometry.y()} "
+                f"{geometry.width()}x{geometry.height()}, frame={display_frame.width()}x{display_frame.height()}, "
+                f"mode_jeu=False, visible={self.video_window.isVisible()}, native={self.video_window.testAttribute(Qt.WA_NativeWindow)}")
 
     def apply_live_settings(self, data, force=False):
         """Applique position et mode jeu même si la vidéo actuelle n'a pas changé."""
@@ -1101,6 +1163,7 @@ class OverlayWindow(QWidget):
                 self.video_label.hide()
                 self.video_canvas.clear()
                 self.video_canvas.hide()
+                self.video_window.clear_frame()
                 self._video_frames_shown = 0
                 self._cleanup_video_file()
 
@@ -1123,6 +1186,7 @@ class OverlayWindow(QWidget):
                 self.video_label.hide()
                 self.video_canvas.clear()
                 self.video_canvas.hide()
+                self.video_window.clear_frame()
                 self.image_label.show()
 
                 image = QImage.fromData(content)
@@ -1170,7 +1234,7 @@ class OverlayWindow(QWidget):
             if self._video_frames_shown == 1:
                 target = frame.size().scaled(self._video_box_size, Qt.KeepAspectRatio)
                 alpha = (frame.pixel(frame.width() // 2, frame.height() // 2) >> 24) & 0xff
-                renderer = "QLabel" if self.current_game_mode else "FrameDisplayWidget"
+                renderer = "QLabel" if self.current_game_mode else "OpaqueVideoWindow"
                 box_size = self._video_box_size
                 log(f"CORE_RENDER_TEST : première frame source={frame.width()}x{frame.height()}, "
                     f"cible={target.width()}x{target.height()}, boîte={box_size.width()}x{box_size.height()}, "
@@ -1206,6 +1270,7 @@ class OverlayWindow(QWidget):
         serveur, et un pop tardif pourrait sinon supprimer l'élément suivant.
         """
         if self.current_loaded_url is None and self.video_path is None:
+            self.video_window.clear_frame()
             self.container.hide()
             return
         log("Arrêt local du média remplacé/retiré côté serveur")
@@ -1269,6 +1334,7 @@ class OverlayWindow(QWidget):
         self.video_label.hide()
         self.video_canvas.clear()
         self.video_canvas.hide()
+        self.video_window.clear_frame()
         self.image_label.hide()
         self.header.clear_content()
         self.text_label.clear()
@@ -1282,14 +1348,13 @@ class OverlayWindow(QWidget):
         # is_clearing repassera à False quand le média suivant sera accepté.
 
     def cleanup(self):
+        self.video_window.clear_frame()
         self._cleanup_video_file()
 
 
 
 def main():
-    auto_monitor = "--auto-monitor" in sys.argv
-    # Passer seulement le nom du script à Qt : --auto-monitor est notre argument privé.
-    app = QApplication([sys.argv[0]])
+    app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
     if not acquire_single_instance():
@@ -1303,29 +1368,14 @@ def main():
     except Exception:
         pass
 
-    saved_pseudo = ""
-    try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, "r", encoding="utf-8") as config_handle:
-                saved_pseudo = config_handle.read().strip()
-    except Exception:
-        saved_pseudo = ""
+    setup = SetupDialog()
+    setup.exec_()
+    if not setup.pseudo:
+        log("Configuration fermée sans pseudo")
+        return 0
 
-    if (auto_monitor or os.environ.get("LIVECHAT_AUTO_START") == "1") and saved_pseudo:
-        pseudo = saved_pseudo
-        log("Démarrage en surveillance automatique avec le pseudo enregistré")
-    else:
-        setup = SetupDialog()
-        setup.exec_()
-        if not setup.pseudo:
-            log("Configuration fermée sans pseudo")
-            return 0
-        pseudo = setup.pseudo
-
-    # L'automatisation est gérée par live_chat_monitor.pyw, séparé du cœur.
-    # Le cœur lui-même doit se fermer lorsque le statut passe à inactif.
-    log(f"Pseudo : {pseudo}")
-    overlay = OverlayWindow(pseudo)
+    log(f"Pseudo : {setup.pseudo}")
+    overlay = OverlayWindow(setup.pseudo)
     overlay.quit_requested.connect(app.quit)
     overlay.show()
     overlay.show_notice("Overlay connecté ✅", 4000)

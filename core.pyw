@@ -13,9 +13,11 @@ import requests
 
 # ---------------------------------------------------------------------------
 # JOURNAL DE DEBUG : C:\Users\<toi>\overlay_debug.log
+# (indispensable car pythonw n'affiche aucune erreur)
 # ---------------------------------------------------------------------------
 LOG_FILE = os.path.join(os.path.expanduser("~"), "overlay_debug.log")
 _log_lock = threading.Lock()
+
 
 def log(msg):
     try:
@@ -25,6 +27,7 @@ def log(msg):
     except Exception:
         pass
 
+
 def _reset_log():
     try:
         if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 300000:
@@ -32,8 +35,10 @@ def _reset_log():
     except Exception:
         pass
 
+
 def _excepthook(exc_type, exc_value, exc_tb):
     log("CRASH :\n" + "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+
 
 sys.excepthook = _excepthook
 try:
@@ -69,13 +74,15 @@ POP_URL = BASE_URL + "/pop_meme"
 
 VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
 
+
 class UnsupportedMedia(Exception):
     pass
 
 # ---------------------------------------------------------------------------
-# UNE SEULE INSTANCE (mutex Windows)
+# UNE SEULE INSTANCE (mutex Windows : disparait tout seul si le process meurt)
 # ---------------------------------------------------------------------------
 _mutex_handle = None
+
 
 def acquire_single_instance():
     global _mutex_handle
@@ -86,11 +93,12 @@ def acquire_single_instance():
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateMutexW.restype = ctypes.c_void_p
         _mutex_handle = kernel32.CreateMutexW(None, False, "Local\\LiveChatOverlayMemeMutex")
-        already_running = ctypes.get_last_error() == 183
+        already_running = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
         return not already_running
     except Exception:
         log("Mutex impossible : " + traceback.format_exc())
         return True
+
 
 # ---------------------------------------------------------------------------
 # FENETRE DE CONFIGURATION DU PSEUDO
@@ -146,6 +154,7 @@ class SetupDialog(QDialog):
                 pass
             self.accept()
 
+
 def create_discord_avatar_with_ring(pixmap, size=40):
     total_size = size + 8
     result = QPixmap(total_size, total_size)
@@ -163,14 +172,19 @@ def create_discord_avatar_with_ring(pixmap, size=40):
     painter.end()
     return result
 
+
+
+
 # ---------------------------------------------------------------------------
-# EN-TETE FLOTTANT (Avatar + Pseudo centrés proprement)
+# EN-TETE (avatar + pseudo) AVEC FLOTTEMENT FLUIDE
+# Dessiné à la main : le mouvement se fait au sous-pixel, à ~60 images/s,
+# sans recalcul de mise en page (l'ancienne version bougeait de 1 pixel entiers).
 # ---------------------------------------------------------------------------
 class FloatingHeader(QWidget):
     PAD = 6
     GAP = 10
-    AMP = 4.0
-    SPEED = 2.4
+    AMP = 4.0      # amplitude du flottement en pixels
+    SPEED = 2.4    # vitesse (radians/seconde) : plus petit = plus lent
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -233,17 +247,8 @@ class FloatingHeader(QWidget):
             QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
         offset = math.sin((time.monotonic() - self._t0) * self.SPEED) * self.AMP
         fm = QFontMetrics(self._font)
-        
-        # Calcul de la largeur totale du contenu pour le centrer parfaitement dans son propre widget
-        av_w = self._avatar.width() if self._avatar else 0
-        text_w = self._text_width(fm) if self._text else 0
-        gap = self.GAP if (self._avatar and self._text) else 0
-        total_content_width = av_w + gap + text_w
-        
-        start_x = (self.width() - total_content_width) / 2.0
         cy = self.height() / 2.0 + offset
-        
-        x = start_x
+        x = self.PAD + 3.0
         if self._avatar:
             p.drawPixmap(QPointF(x, cy - self._avatar.height() / 2.0), self._avatar)
             x += self._avatar.width() + self.GAP
@@ -258,7 +263,10 @@ class FloatingHeader(QWidget):
         p.end()
 
 # ---------------------------------------------------------------------------
-# SURFACE VIDEO FRAME PAR FRAME
+# AFFICHAGE VIDEO IMAGE PAR IMAGE
+# QGraphicsVideoItem / QVideoWidget ne s'affichent pas dans une fenêtre
+# transparente (on entendait le son mais on ne voyait rien). On récupère donc
+# chaque image de la vidéo et on la dessine dans un simple QLabel.
 # ---------------------------------------------------------------------------
 class FrameSurface(QAbstractVideoSurface):
     frame_ready = pyqtSignal(QImage)
@@ -304,7 +312,9 @@ class FrameSurface(QAbstractVideoSurface):
             if self.surfaceFormat().scanLineDirection() == QVideoSurfaceFormat.BottomToTop:
                 img = img.mirrored(False, True)
             w, h = self.target_size
-            img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # copie indépendante
+            # Certains lecteurs mettent la transparence à 0 : sur une fenêtre transparente
+            # l'image devient alors invisible. On force une image 100% opaque.
             img = img.convertToFormat(QImage.Format_RGB32)
         finally:
             clone.unmap()
@@ -317,9 +327,10 @@ class FrameSurface(QAbstractVideoSurface):
         return True
 
 # ---------------------------------------------------------------------------
-# OVERLAY PRINCIPAL
+# OVERLAY
 # ---------------------------------------------------------------------------
 class OverlayWindow(QWidget):
+    # Signaux : seul moyen fiable de parler à l'interface depuis le thread réseau
     media_ready = pyqtSignal(dict)
     hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
@@ -340,6 +351,8 @@ class OverlayWindow(QWidget):
         self.init_network()
 
     def init_ui(self):
+        # Fenêtre sans bord, au premier plan, transparente, et "traversable" à la souris
+        # (Qt.WindowTransparentForInput remplace l'ancien bricolage ctypes)
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -356,18 +369,17 @@ class OverlayWindow(QWidget):
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
 
-        # En-tête centré au-dessus du média
         self.header = FloatingHeader(self.container)
-        container_layout.addWidget(self.header, alignment=Qt.AlignCenter)
+        container_layout.addWidget(self.header)
 
         self.image_label = QLabel(self.container)
         self.image_label.setAlignment(Qt.AlignCenter)
-        container_layout.addWidget(self.image_label, alignment=Qt.AlignCenter)
+        container_layout.addWidget(self.image_label)
 
         self.video_label = QLabel(self.container)
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setFixedSize(850, 480)
-        container_layout.addWidget(self.video_label, alignment=Qt.AlignCenter)
+        container_layout.addWidget(self.video_label)
         self.video_label.hide()
 
         self.video_surface = FrameSurface(self)
@@ -375,6 +387,8 @@ class OverlayWindow(QWidget):
 
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
         self.media_player.setVideoOutput(self.video_surface)
+        # IMPORTANT : EndOfMedia est un "mediaStatus", pas un "state".
+        # L'ancien code utilisait stateChanged -> la fin de vidéo n'était jamais détectée.
         self.media_player.mediaStatusChanged.connect(self.on_media_status)
         self.media_player.error.connect(self.on_media_error)
 
@@ -389,7 +403,7 @@ class OverlayWindow(QWidget):
         shadow_text.setColor(QColor(0, 0, 0, 255))
         shadow_text.setOffset(1, 1)
         self.text_label.setGraphicsEffect(shadow_text)
-        container_layout.addWidget(self.text_label, alignment=Qt.AlignCenter)
+        container_layout.addWidget(self.text_label)
 
         self.main_layout.addStretch(1)
         self.main_layout.addWidget(self.container)
@@ -400,6 +414,7 @@ class OverlayWindow(QWidget):
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
 
+    # ---- petit message de test au démarrage -------------------------------
     def show_notice(self, text, ms=4000):
         self.header.clear_content()
         self.image_label.hide()
@@ -429,6 +444,7 @@ class OverlayWindow(QWidget):
             self.main_layout.addWidget(self.container)
             self.main_layout.addStretch(1)
 
+    # ---- réseau (thread séparé) -------------------------------------------
     def init_network(self):
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
@@ -443,8 +459,11 @@ class OverlayWindow(QWidget):
         return False
 
     def _make_displayable_image(self, session, url, content):
+        """Renvoie des octets d'image lisibles par Qt, ou None (ex : AVIF non géré par Qt)."""
         if not QImage.fromData(content).isNull():
             return content
+
+        # 1) Pillow, s'il est installé (les versions récentes lisent l'AVIF)
         try:
             from PIL import Image
             im = Image.open(io.BytesIO(content)).convert("RGBA")
@@ -457,16 +476,19 @@ class OverlayWindow(QWidget):
         except Exception as e:
             log(f"Conversion Pillow impossible : {e}")
 
+        # 2) conversion par le proxy de Discord (format=png)
         try:
             parts = urlparse(url)
             if parts.netloc in ("cdn.discordapp.com", "media.discordapp.net"):
                 query = dict(parse_qsl(parts.query))
                 query["format"] = "png"
-                new_url = urlunparse(parts._replace(netloc="media.discordapp.net", query=urlencode(query)))
+                new_url = urlunparse(parts._replace(netloc="media.discordapp.net",
+                                                    query=urlencode(query)))
                 r = session.get(new_url, timeout=15)
                 if r.status_code == 200 and not QImage.fromData(r.content).isNull():
                     log("Image convertie via le proxy Discord")
                     return r.content
+                log(f"Proxy Discord : HTTP {r.status_code}, image inutilisable")
         except Exception as e:
             log(f"Conversion via proxy impossible : {e}")
         return None
@@ -474,6 +496,7 @@ class OverlayWindow(QWidget):
     def request_quit(self, reason):
         log("Fermeture demandée : " + reason)
         self.quit_requested.emit()
+        # filet de sécurité : si la fermeture propre traîne, on tue le process
         threading.Timer(5, lambda: os._exit(0)).start()
 
     def network_worker(self):
@@ -529,6 +552,7 @@ class OverlayWindow(QWidget):
                     time.sleep(1.5)
                     continue
 
+                # nouveau média à afficher
                 self.current_loaded_url = new_url
                 try:
                     media_res = session.get(new_url, timeout=20)
@@ -543,7 +567,8 @@ class OverlayWindow(QWidget):
                     if not is_video:
                         displayable = self._make_displayable_image(session, new_url, media_res.content)
                         if displayable is None:
-                            raise UnsupportedMedia("format d'image non supporté (" + data["content_type"] + ")")
+                            raise UnsupportedMedia(
+                                "format d'image non supporté (" + data["content_type"] + ")")
                         data["content_bytes"] = displayable
 
                     avatar_url = data.get("avatar", "")
@@ -583,6 +608,7 @@ class OverlayWindow(QWidget):
                     last_err = msg
                 time.sleep(2)
 
+    # ---- affichage (thread interface) -------------------------------------
     def handle_new_media(self, data):
         try:
             self.is_clearing = False
@@ -658,6 +684,7 @@ class OverlayWindow(QWidget):
                 self.container.show()
                 self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
+                # filet de sécurité : si la vidéo ne se termine jamais, on la coupe après 5 min
                 self.close_timer.start(300000)
             else:
                 self.video_label.hide()
@@ -715,7 +742,7 @@ class OverlayWindow(QWidget):
         if self.video_path:
             try:
                 self.media_player.stop()
-                self.media_player.setMedia(QMediaContent())
+                self.media_player.setMedia(QMediaContent())  # libère le fichier sous Windows
                 if os.path.exists(self.video_path):
                     os.remove(self.video_path)
             except Exception:
@@ -738,6 +765,7 @@ class OverlayWindow(QWidget):
     def cleanup(self):
         self._cleanup_video_file()
 
+
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -747,6 +775,7 @@ def main():
         QMessageBox.warning(None, "Live Chat déjà actif", "Le live chat est déjà actif sur le PC !")
         return 0
 
+    # nettoyage de l'ancien système de lock par fichier
     try:
         if os.path.exists(OLD_LOCK_FILE):
             os.remove(OLD_LOCK_FILE)
@@ -769,6 +798,7 @@ def main():
     overlay.cleanup()
     log("=== Arrêt propre ===")
     return code
+
 
 if __name__ == "__main__":
     sys.exit(main())

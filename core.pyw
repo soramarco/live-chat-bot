@@ -50,13 +50,13 @@ _reset_log()
 log("=== Démarrage core.pyw ===")
 
 try:
-    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, QPointF, QSize, pyqtSignal
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, QPointF, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve
     from PyQt5.QtGui import (
         QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
     )
     from PyQt5.QtWidgets import (
         QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
-        QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QSizePolicy,
+        QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QLineEdit, QPushButton, QMessageBox, QSizePolicy,
     )
     from PyQt5.QtMultimedia import (
         QMediaPlayer, QMediaContent, QAbstractVideoSurface, QAbstractVideoBuffer,
@@ -410,6 +410,8 @@ class OverlayWindow(QWidget):
         self.is_clearing = False
         self.current_max_size = 850
         self._video_frames_shown = 0
+        self._fade_animation = None
+        self._opacity_effect = None
 
         self.media_ready.connect(self.handle_new_media)
         self.hide_requested.connect(self.hide_overlay_ui)
@@ -430,6 +432,14 @@ class OverlayWindow(QWidget):
         self.main_layout.setContentsMargins(40, 0, 40, 0)
 
         self.container = QWidget(self)
+        self._opacity_effect = QGraphicsOpacityEffect(self.container)
+        self._opacity_effect.setOpacity(1.0)
+        self.container.setGraphicsEffect(self._opacity_effect)
+        self._fade_animation = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+        self._fade_animation.setDuration(280)
+        self._fade_animation.setStartValue(0.0)
+        self._fade_animation.setEndValue(1.0)
+        self._fade_animation.setEasingCurve(QEasingCurve.OutCubic)
         container_layout = QVBoxLayout(self.container)
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
@@ -476,6 +486,16 @@ class OverlayWindow(QWidget):
         self.close_timer = QTimer(self)
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
+
+    def show_with_fade(self):
+        """Affiche pseudo/avatar/média avec un fondu entrant, sans fondu sortant."""
+        if self._fade_animation is not None:
+            self._fade_animation.stop()
+        self._opacity_effect.setOpacity(0.0)
+        self.container.show()
+        self.container.raise_()
+        if self._fade_animation is not None:
+            self._fade_animation.start()
 
     def show_notice(self, text, ms=4000):
         self.header.clear_content()
@@ -729,7 +749,7 @@ class OverlayWindow(QWidget):
                 log(f"Lecture vidéo : {self.video_path}")
 
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_path)))
-                self.container.show()
+                self.show_with_fade()
                 self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
                 self.close_timer.start(300000)
@@ -747,7 +767,7 @@ class OverlayWindow(QWidget):
                     pixmap = pixmap.scaled(self.current_max_size, self.current_max_size,
                                            Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.image_label.setPixmap(pixmap)
-                self.container.show()
+                self.show_with_fade()
                 self.raise_()
                 self.close_timer.start(7000)
         except Exception:
@@ -765,6 +785,11 @@ class OverlayWindow(QWidget):
         if pixmap.isNull():
             log("Image vidéo reçue mais conversion en QPixmap impossible")
             return
+        # Redimensionne une seconde fois dans la taille réelle du QLabel : cela
+        # évite qu'une frame paysage soit mal rendue en mode normal sur certains PC.
+        target = self.video_label.size()
+        if target.width() > 0 and target.height() > 0:
+            pixmap = pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if not self.video_label.isVisible():
             self.video_label.show()
         self.video_label.setPixmap(pixmap)
@@ -811,6 +836,10 @@ class OverlayWindow(QWidget):
             self.video_path = None
 
     def hide_overlay_ui(self):
+        if self._fade_animation is not None:
+            self._fade_animation.stop()
+        if self._opacity_effect is not None:
+            self._opacity_effect.setOpacity(1.0)
         self.close_timer.stop()
         self.media_player.stop()
         self.image_label.clear()

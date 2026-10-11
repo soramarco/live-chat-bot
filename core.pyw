@@ -56,7 +56,7 @@ try:
     )
     from PyQt5.QtWidgets import (
         QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
-        QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox,
+        QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QSizePolicy,
     )
     from PyQt5.QtMultimedia import (
         QMediaPlayer, QMediaContent, QAbstractVideoSurface, QAbstractVideoBuffer,
@@ -72,7 +72,71 @@ BASE_URL = "https://live-chat-bot-ctus.onrender.com"
 SERVER_URL = BASE_URL + "/get_next_meme"
 POP_URL = BASE_URL + "/pop_meme"
 
-VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
+VIDEO_EXTS = (
+    ".mp4", ".m4v", ".mov", ".webm", ".avi", ".mkv", ".wmv",
+    ".flv", ".mpeg", ".mpg", ".3gp", ".ogv", ".ts", ".m2ts",
+)
+
+
+def is_video_media(url, content_type, content):
+    """Détecte les vidéos par type MIME, extension ou signature du fichier."""
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    path = urlparse(url or "").path.lower()
+    data = content or b""
+
+    if mime.startswith("video/") or path.endswith(VIDEO_EXTS):
+        return True
+
+    # MP4 / MOV / M4V : les fichiers ISO-BMFF contiennent généralement 'ftyp' ici.
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return True
+    # WebM / Matroska (signature EBML).
+    if data.startswith(bytes.fromhex("1a45dfa3")):
+        return True
+    # AVI.
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"AVI ":
+        return True
+    # FLV.
+    if data.startswith(b"FLV"):
+        return True
+
+    return False
+
+
+def infer_video_suffix(url, content_type, content):
+    """Choisit une extension locale cohérente pour aider le lecteur Qt."""
+    path = urlparse(url or "").path.lower()
+    for ext in VIDEO_EXTS:
+        if path.endswith(ext):
+            return ext
+
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    mime_suffixes = {
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/webm": ".webm",
+        "video/x-matroska": ".mkv",
+        "video/x-msvideo": ".avi",
+        "video/avi": ".avi",
+        "video/x-ms-wmv": ".wmv",
+        "video/x-flv": ".flv",
+        "video/mpeg": ".mpeg",
+        "video/3gpp": ".3gp",
+        "video/mp2t": ".ts",
+    }
+    if mime in mime_suffixes:
+        return mime_suffixes[mime]
+
+    data = content or b""
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return ".mp4"
+    if data.startswith(bytes.fromhex("1a45dfa3")):
+        return ".webm"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"AVI ":
+        return ".avi"
+    if data.startswith(b"FLV"):
+        return ".flv"
+    return ".mp4"
 
 
 class UnsupportedMedia(Exception):
@@ -173,18 +237,14 @@ def create_discord_avatar_with_ring(pixmap, size=40):
     return result
 
 
-
-
 # ---------------------------------------------------------------------------
-# EN-TETE (avatar + pseudo) AVEC FLOTTEMENT FLUIDE
-# Dessiné à la main : le mouvement se fait au sous-pixel, à ~60 images/s,
-# sans recalcul de mise en page (l'ancienne version bougeait de 1 pixel entiers).
+# EN-TETE (avatar + pseudo) AVEC FLOTTEMENT FLUIDE ET CENTRAGE CORRIGÉ
 # ---------------------------------------------------------------------------
 class FloatingHeader(QWidget):
     PAD = 6
     GAP = 10
-    AMP = 4.0      # amplitude du flottement en pixels
-    SPEED = 2.4    # vitesse (radians/seconde) : plus petit = plus lent
+    AMP = 3.0      # amplitude douce du flottement en pixels
+    SPEED = 1.8    # vitesse (radians/seconde) : plus petit = plus lent
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -193,8 +253,10 @@ class FloatingHeader(QWidget):
         self._font = QFont("Segoe UI", 20, QFont.Bold)
         self._t0 = time.monotonic()
         self._timer = QTimer(self)
-        self._timer.setInterval(16)
+        self._timer.setTimerType(Qt.PreciseTimer)
+        self._timer.setInterval(16)  # environ 60 images/s
         self._timer.timeout.connect(self.update)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def set_content(self, text, avatar, font):
@@ -248,7 +310,17 @@ class FloatingHeader(QWidget):
         offset = math.sin((time.monotonic() - self._t0) * self.SPEED) * self.AMP
         fm = QFontMetrics(self._font)
         cy = self.height() / 2.0 + offset
-        x = self.PAD + 3.0
+
+        # Correction : calcul précis pour centrer le bloc complet (avatar + texte) au milieu du widget
+        av_w = self._avatar.width() if self._avatar else 0
+        text_w = self._text_width(fm) if self._text else 0
+        gap = self.GAP if (self._avatar and self._text) else 0
+        total_content_width = av_w + gap + text_w
+        
+        x = (self.width() - total_content_width) / 2.0
+        if x < 0:
+            x = self.PAD + 3.0
+
         if self._avatar:
             p.drawPixmap(QPointF(x, cy - self._avatar.height() / 2.0), self._avatar)
             x += self._avatar.width() + self.GAP
@@ -264,9 +336,6 @@ class FloatingHeader(QWidget):
 
 # ---------------------------------------------------------------------------
 # AFFICHAGE VIDEO IMAGE PAR IMAGE
-# QGraphicsVideoItem / QVideoWidget ne s'affichent pas dans une fenêtre
-# transparente (on entendait le son mais on ne voyait rien). On récupère donc
-# chaque image de la vidéo et on la dessine dans un simple QLabel.
 # ---------------------------------------------------------------------------
 class FrameSurface(QAbstractVideoSurface):
     frame_ready = pyqtSignal(QImage)
@@ -312,9 +381,7 @@ class FrameSurface(QAbstractVideoSurface):
             if self.surfaceFormat().scanLineDirection() == QVideoSurfaceFormat.BottomToTop:
                 img = img.mirrored(False, True)
             w, h = self.target_size
-            img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # copie indépendante
-            # Certains lecteurs mettent la transparence à 0 : sur une fenêtre transparente
-            # l'image devient alors invisible. On force une image 100% opaque.
+            img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             img = img.convertToFormat(QImage.Format_RGB32)
         finally:
             clone.unmap()
@@ -330,7 +397,6 @@ class FrameSurface(QAbstractVideoSurface):
 # OVERLAY
 # ---------------------------------------------------------------------------
 class OverlayWindow(QWidget):
-    # Signaux : seul moyen fiable de parler à l'interface depuis le thread réseau
     media_ready = pyqtSignal(dict)
     hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
@@ -343,6 +409,7 @@ class OverlayWindow(QWidget):
         self.last_done_url = None
         self.is_clearing = False
         self.current_max_size = 850
+        self._video_frames_shown = 0
 
         self.media_ready.connect(self.handle_new_media)
         self.hide_requested.connect(self.hide_overlay_ui)
@@ -351,8 +418,6 @@ class OverlayWindow(QWidget):
         self.init_network()
 
     def init_ui(self):
-        # Fenêtre sans bord, au premier plan, transparente, et "traversable" à la souris
-        # (Qt.WindowTransparentForInput remplace l'ancien bricolage ctypes)
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -387,8 +452,6 @@ class OverlayWindow(QWidget):
 
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
         self.media_player.setVideoOutput(self.video_surface)
-        # IMPORTANT : EndOfMedia est un "mediaStatus", pas un "state".
-        # L'ancien code utilisait stateChanged -> la fin de vidéo n'était jamais détectée.
         self.media_player.mediaStatusChanged.connect(self.on_media_status)
         self.media_player.error.connect(self.on_media_error)
 
@@ -414,7 +477,6 @@ class OverlayWindow(QWidget):
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
 
-    # ---- petit message de test au démarrage -------------------------------
     def show_notice(self, text, ms=4000):
         self.header.clear_content()
         self.image_label.hide()
@@ -444,7 +506,6 @@ class OverlayWindow(QWidget):
             self.main_layout.addWidget(self.container)
             self.main_layout.addStretch(1)
 
-    # ---- réseau (thread séparé) -------------------------------------------
     def init_network(self):
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
@@ -459,11 +520,8 @@ class OverlayWindow(QWidget):
         return False
 
     def _make_displayable_image(self, session, url, content):
-        """Renvoie des octets d'image lisibles par Qt, ou None (ex : AVIF non géré par Qt)."""
         if not QImage.fromData(content).isNull():
             return content
-
-        # 1) Pillow, s'il est installé (les versions récentes lisent l'AVIF)
         try:
             from PIL import Image
             im = Image.open(io.BytesIO(content)).convert("RGBA")
@@ -476,7 +534,6 @@ class OverlayWindow(QWidget):
         except Exception as e:
             log(f"Conversion Pillow impossible : {e}")
 
-        # 2) conversion par le proxy de Discord (format=png)
         try:
             parts = urlparse(url)
             if parts.netloc in ("cdn.discordapp.com", "media.discordapp.net"):
@@ -488,16 +545,14 @@ class OverlayWindow(QWidget):
                 if r.status_code == 200 and not QImage.fromData(r.content).isNull():
                     log("Image convertie via le proxy Discord")
                     return r.content
-                log(f"Proxy Discord : HTTP {r.status_code}, image inutilisable")
         except Exception as e:
             log(f"Conversion via proxy impossible : {e}")
         return None
 
     def request_quit(self, reason):
         log("Fermeture demandée : " + reason)
+        # L'arrêt passe par la boucle Qt pour permettre le nettoyage du fichier vidéo.
         self.quit_requested.emit()
-        # filet de sécurité : si la fermeture propre traîne, on tue le process
-        threading.Timer(5, lambda: os._exit(0)).start()
 
     def network_worker(self):
         session = requests.Session()
@@ -552,7 +607,6 @@ class OverlayWindow(QWidget):
                     time.sleep(1.5)
                     continue
 
-                # nouveau média à afficher
                 self.current_loaded_url = new_url
                 try:
                     media_res = session.get(new_url, timeout=20)
@@ -562,8 +616,7 @@ class OverlayWindow(QWidget):
                     data["content_type"] = media_res.headers.get("Content-Type", "")
                     log(f"Média téléchargé ({len(media_res.content)} octets, {data['content_type']})")
 
-                    url_path = urlparse(new_url).path.lower()
-                    is_video = data["content_type"].lower().startswith("video/") or url_path.endswith(VIDEO_EXTS)
+                    is_video = is_video_media(new_url, data["content_type"], media_res.content)
                     if not is_video:
                         displayable = self._make_displayable_image(session, new_url, media_res.content)
                         if displayable is None:
@@ -608,7 +661,6 @@ class OverlayWindow(QWidget):
                     last_err = msg
                 time.sleep(2)
 
-    # ---- affichage (thread interface) -------------------------------------
     def handle_new_media(self, data):
         try:
             self.is_clearing = False
@@ -656,10 +708,10 @@ class OverlayWindow(QWidget):
                     avatar_pix = create_discord_avatar_with_ring(pix, size=avatar_size)
             self.header.set_content(str(author), avatar_pix, header_font)
 
-            content = data.get("content_bytes")
+            content = data.get("content_bytes") or b""
             path = urlparse(url).path.lower()
-            ctype = (data.get("content_type") or "").lower()
-            is_vid = ctype.startswith("video/") or path.endswith(VIDEO_EXTS)
+            ctype = data.get("content_type") or ""
+            is_vid = is_video_media(url, ctype, content)
 
             if is_vid:
                 self.image_label.hide()
@@ -667,12 +719,8 @@ class OverlayWindow(QWidget):
                 self.video_label.show()
                 self._cleanup_video_file()
 
-                suffix = ".mp4"
-                for ext in VIDEO_EXTS:
-                    if path.endswith(ext):
-                        suffix = ext
-                        break
-
+                suffix = infer_video_suffix(url, ctype, content)
+                self._video_frames_shown = 0
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                 tmp.write(content)
                 tmp.flush()
@@ -684,14 +732,17 @@ class OverlayWindow(QWidget):
                 self.container.show()
                 self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
-                # filet de sécurité : si la vidéo ne se termine jamais, on la coupe après 5 min
                 self.close_timer.start(300000)
             else:
                 self.video_label.hide()
                 self.image_label.show()
 
                 image = QImage.fromData(content)
+                if image.isNull():
+                    raise UnsupportedMedia("Qt ne peut pas décoder cette image après conversion")
                 pixmap = QPixmap.fromImage(image)
+                if pixmap.isNull():
+                    raise UnsupportedMedia("impossible de créer le bitmap de l'image")
                 if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
                     pixmap = pixmap.scaled(self.current_max_size, self.current_max_size,
                                            Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -708,8 +759,18 @@ class OverlayWindow(QWidget):
         self.video_surface.target_size = (w, h)
 
     def on_video_frame(self, img):
-        if self.current_loaded_url is not None:
-            self.video_label.setPixmap(QPixmap.fromImage(img))
+        if self.current_loaded_url is None or img is None or img.isNull():
+            return
+        pixmap = QPixmap.fromImage(img)
+        if pixmap.isNull():
+            log("Image vidéo reçue mais conversion en QPixmap impossible")
+            return
+        if not self.video_label.isVisible():
+            self.video_label.show()
+        self.video_label.setPixmap(pixmap)
+        self._video_frames_shown += 1
+        if self._video_frames_shown == 1:
+            log(f"Première image réellement envoyée au QLabel : {pixmap.width()}x{pixmap.height()}")
 
     def on_media_status(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -742,7 +803,7 @@ class OverlayWindow(QWidget):
         if self.video_path:
             try:
                 self.media_player.stop()
-                self.media_player.setMedia(QMediaContent())  # libère le fichier sous Windows
+                self.media_player.setMedia(QMediaContent()) 
                 if os.path.exists(self.video_path):
                     os.remove(self.video_path)
             except Exception:
@@ -775,7 +836,6 @@ def main():
         QMessageBox.warning(None, "Live Chat déjà actif", "Le live chat est déjà actif sur le PC !")
         return 0
 
-    # nettoyage de l'ancien système de lock par fichier
     try:
         if os.path.exists(OLD_LOCK_FILE):
             os.remove(OLD_LOCK_FILE)

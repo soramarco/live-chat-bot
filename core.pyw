@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-11-native-opaque-video-v2-rect-import")
+log("CORE_BUILD_ID=2026-10-11-native-opaque-video-v3-lower-position")
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
@@ -601,7 +601,9 @@ class OverlayWindow(QWidget):
         log(f"Taille de l'overlay : {screen.width()}x{screen.height()}")
 
         self.main_layout = QHBoxLayout(self)
-        self.main_layout.setContentsMargins(40, 0, 40, 0)
+        # Léger décalage vertical vers le bas : conserve les positions
+        # horizontales gauche / centre / droite et suit les deux rendus vidéo.
+        self.main_layout.setContentsMargins(40, 30, 40, 0)
 
         self.container = QWidget(self)
         # On évite setWindowOpacity sur la fenêtre plein écran transparente :

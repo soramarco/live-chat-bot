@@ -200,7 +200,6 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v77")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Utilisation de thinking=True pour éviter l'expiration de l'interaction (Erreur 10062)
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
         except Exception:
@@ -345,7 +344,7 @@ def get_next_meme():
     user = request.args.get("user", "").strip()
     
     if not user:
-        return jsonify({"url": None})
+        return jsonify({"url": None, "status": "inactive"})
 
     with data_lock:
         if user not in active_users:
@@ -361,10 +360,11 @@ def get_next_meme():
                 "content": current_active_item["content"],
                 "url": current_active_item["url"],
                 "position": position,
-                "game_mode": game_mode
+                "game_mode": game_mode,
+                "status": "active"
             }
         else:
-            res_data = {"url": None, "position": position, "game_mode": game_mode}
+            res_data = {"url": None, "position": position, "game_mode": game_mode, "status": "active"}
 
     return jsonify(res_data)
 

@@ -11,18 +11,17 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 STORAGE_FILE = "bot_storage.json"
-TARGET_CHANNEL_ID = 1544497366814560318  
+TARGET_CHANNEL_ID = 1544497366814560318  # ID de ton salon Discord sous forme d'entier brut
 
 global_queue = []
 current_active_item = None
 active_users = set()
 user_positions = {}
-user_game_modes = {}  # Stockage du Mode Jeu (True / False) par utilisateur
+user_game_modes = {}
 data_lock = threading.Lock()
 last_pop_time = 0
 
 main_panel_message = None
-cached_response = {"data": {"url": None}, "timestamp": 0}
 
 def load_data():
     global user_positions, active_users, user_game_modes
@@ -127,7 +126,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
             
         with data_lock:
             if self.username in active_users:
@@ -146,7 +145,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0)
     async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         with data_lock:
             current_gm = user_game_modes.get(self.username, False)
             user_game_modes[self.username] = not current_gm
@@ -156,7 +155,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         with data_lock:
             user_positions[self.username] = "left"
             save_data()
@@ -165,7 +164,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1)
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         with data_lock:
             user_positions[self.username] = "center"
             save_data()
@@ -174,7 +173,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         with data_lock:
             user_positions[self.username] = "right"
             save_data()
@@ -244,7 +243,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    global current_active_item, global_queue, cached_response
+    global current_active_item, global_queue
     
     if message.author.bot:
         return
@@ -280,8 +279,6 @@ async def on_message(message):
                 else:
                     global_queue.append(item)
                     is_first = False
-                
-                cached_response["timestamp"] = 0
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
@@ -298,9 +295,9 @@ class ItemStopView(discord.ui.View):
 
     @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
             
-        global current_active_item, global_queue, cached_response, last_pop_time
+        global current_active_item, global_queue, last_pop_time
         with data_lock:
             now = time.time()
             if now - last_pop_time < 1.5:
@@ -319,7 +316,6 @@ class ItemStopView(discord.ui.View):
                     asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
                 else:
                     current_active_item = None
-                cached_response["timestamp"] = 0
 
 async def send_control_message(item, is_active):
     try:
@@ -390,7 +386,6 @@ def pop_meme():
                 asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
             else:
                 current_active_item = None
-            cached_response["timestamp"] = 0
             
     name = current_active_item["name"] if current_active_item else None
     return jsonify({"status": "success", "next": name})

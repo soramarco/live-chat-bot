@@ -1,4 +1,3 @@
-import hashlib
 import sys
 import time
 import math
@@ -7,34 +6,12 @@ from io import BytesIO
 import tempfile
 import os
 import threading
-import subprocess
 import cv2
 import json
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QUrl, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QBrush, QPainterPath
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QGraphicsOpacityEffect
-
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/overlay.pyw"
-
-def check_for_updates():
-    try:
-        response = requests.get(GITHUB_RAW_URL, timeout=3)
-        if response.status_code == 200:
-            remote_code = response.content
-            current_file_path = os.path.abspath(__file__)
-            with open(current_file_path, "rb") as f:
-                local_code = f.read()
-            if hashlib.md5(remote_code).digest() != hashlib.md5(local_code).digest():
-                temp_update_path = "overlay_new.pyw"
-                with open(temp_update_path, "wb") as f:
-                    f.write(remote_code)
-                with open("update.bat", "w") as b:
-                    b.write("@echo off\ntimeout /t 2 /nobreak > nul\nmove /y overlay_new.pyw overlay.pyw\nstart pythonw.exe overlay.pyw\ndel \"%~f0\"\n")
-                subprocess.Popen("update.bat", shell=True)
-                sys.exit(0)
-    except:
-        pass
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QGraphicsOpacityEffect
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
 SERVER_URL = "https://live-chat-bot-ctus.onrender.com/get_next_meme"
@@ -452,7 +429,6 @@ class OverlayWindow(QWidget):
         self.is_clearing = False
 
 def main():
-    check_for_updates()
     app = QApplication(sys.argv)
     setup = SetupDialog()
     setup.show()

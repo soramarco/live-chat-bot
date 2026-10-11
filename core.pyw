@@ -99,6 +99,7 @@ class OverlayWindow(QWidget):
         self.init_network()
 
     def init_ui(self):
+        # Fenêtre sans bord, toujours au premier plan, transparente
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -187,7 +188,10 @@ class OverlayWindow(QWidget):
         self.main_layout.addStretch(1)
         self.main_layout.addWidget(self.container)
         self.main_layout.addStretch(1)
-        self.container.hide()
+        
+        # On garde le conteneur visible en permanence mais totalement transparent/vide au début 
+        # pour s'assurer que la fenêtre PyQt réagit bien aux événements et s'affiche sur l'écran
+        self.container.show()
 
         self.close_timer = QTimer(self)
         self.close_timer.setSingleShot(True)
@@ -217,7 +221,6 @@ class OverlayWindow(QWidget):
             self.main_layout.addStretch(1)
 
     def init_network(self):
-        print("[DEBUG] Démarrage du thread de surveillance réseau...")
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
 
@@ -226,12 +229,9 @@ class OverlayWindow(QWidget):
             try:
                 url_query = f"{SERVER_URL}?user={requests.utils.quote(self.discord_pseudo)}"
                 res = requests.get(url_query, timeout=3)
-                print(f"[DEBUG API] Réponse reçue (Code {res.status_code}) : {res.text}")
-                
                 if res.status_code == 200:
                     data = res.json()
                     if data.get("status") == "inactive":
-                        print("[DEBUG] Statut inactif détecté, fermeture immédiate.")
                         if os.path.exists(LOCK_FILE):
                             try:
                                 os.remove(LOCK_FILE)
@@ -248,7 +248,6 @@ class OverlayWindow(QWidget):
                         continue
 
                     elif new_url != self.current_loaded_url and not self.is_transitioning:
-                        print(f"[DEBUG] Nouveau média détecté : {new_url}")
                         self.is_transitioning = True
                         self.current_loaded_url = new_url
                         
@@ -265,19 +264,16 @@ class OverlayWindow(QWidget):
                                     pass
                             QTimer.singleShot(0, lambda d=data: self.handle_new_media(d))
                         else:
-                            print("[DEBUG] Erreur téléchargement du média.")
                             self.is_transitioning = False
                     else:
                         time.sleep(1.5)
                 else:
                     time.sleep(1.5)
             except Exception as e:
-                print(f"[DEBUG Erreur réseau] {e}")
                 time.sleep(2)
 
     def handle_new_media(self, data):
         try:
-            print("[DEBUG UI] Affichage du média en cours...")
             self.media_player.stop()
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
@@ -332,7 +328,6 @@ class OverlayWindow(QWidget):
             is_vid = any(ext in url.lower() for ext in [".mp4", ".mov", ".webm", ".avi"])
 
             if is_vid:
-                print("[DEBUG VIDEO] Chargement et lecture de la vidéo...")
                 self.image_label.hide()
                 self.graphics_view.show()
 
@@ -359,7 +354,6 @@ class OverlayWindow(QWidget):
                 QTimer.singleShot(100, self.media_player.play)
                 self.close_timer.stop()
             else:
-                print("[DEBUG IMAGE] Affichage de l'image...")
                 self.graphics_view.hide()
                 self.image_label.show()
 
@@ -372,14 +366,12 @@ class OverlayWindow(QWidget):
                 self.container.show()
                 self.close_timer.start(7000)
         except Exception as e:
-            print(f"[DEBUG Erreur handle_new_media] {e}")
             self.hide_overlay_ui()
         finally:
             self.is_transitioning = False
 
     def media_state_changed(self, state):
         if state == QMediaPlayer.EndOfMedia:
-            print("[DEBUG VIDEO] Fin de lecture, envoi du pop_meme...")
             self.finish_media_playback()
 
     def finish_media_playback(self):
@@ -403,7 +395,8 @@ class OverlayWindow(QWidget):
         self.author_label.clear()
         self.avatar_label.clear()
         self.text_label.clear()
-        self.container.hide()
+        # On garde le conteneur actif pour que la fenêtre ne disparaisse pas totalement de l'écran
+        self.container.show()
         
         if self.video_file and os.path.exists(self.video_file.name):
             try:

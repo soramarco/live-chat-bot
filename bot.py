@@ -295,7 +295,8 @@ class ItemStopView(discord.ui.View):
 
     @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(thinking=True)
+        # Correction pour éviter le chargement infini "réfléchit..."
+        await interaction.response.defer()
             
         global current_active_item, global_queue, last_pop_time
         with data_lock:

@@ -34,7 +34,7 @@ def load_data():
         except Exception as e:
             print(f"[ERREUR] Chargement stockage : {e}")
 
-def save_data():
+def swift_save_data():
     try:
         data = {
             "user_positions": user_positions,
@@ -52,15 +52,35 @@ load_data()
 def home():
     return "Bot is alive!", 200
 
-class PersonalControlView(discord.ui.View):
-    def __init__(self, is_active, username):
+def get_channel_panel_content(username):
+    with data_lock:
+        count = len(active_users)
+        users_str = ", ".join(f"**{u}**" for u in active_users) if count > 0 else "_Personne_"
+        is_active = username in active_users
+        current_pos = user_positions.get(username, "center").upper()
+        gm_status = "OUI" if user_game_modes.get(username, False) else "NON"
+
+    status_str = "🟢 **Ton Live Chat est ACTIF !**" if is_active else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
+    
+    return (
+        f"📊 **Statut en direct** : {count} actif(s)\n"
+        f"👤 **Connectés** : {users_str}\n\n"
+        f"{status_str} | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
+    )
+
+class UnifiedControlView(discord.ui.View):
+    def __init__(self, username):
         super().__init__(timeout=None)
-        self.is_active = is_active
         self.username = username
         self.update_button_styles()
 
     def update_button_styles(self):
-        if self.is_active:
+        with data_lock:
+            is_active = self.username in active_users
+            is_gm = user_game_modes.get(self.username, False)
+            pos = user_positions.get(self.username, "center")
+
+        if is_active:
             self.toggle_btn.label = "Désactiver mon Live Chat"
             self.toggle_btn.style = discord.ButtonStyle.danger
             self.toggle_btn.emoji = "🔴"
@@ -69,7 +89,6 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-        is_gm = user_game_modes.get(self.username, False)
         if is_gm:
             self.btn_game_mode.label = "Mode Jeu : ACTIF"
             self.btn_game_mode.style = discord.ButtonStyle.success
@@ -79,80 +98,80 @@ class PersonalControlView(discord.ui.View):
             self.btn_game_mode.style = discord.ButtonStyle.secondary
             self.btn_game_mode.emoji = "🎮"
 
-        pos = user_positions.get(self.username, "center")
         self.btn_left.style = discord.ButtonStyle.primary if pos == "left" else discord.ButtonStyle.secondary
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
         self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
 
-    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0, custom_id="persistent_toggle_btn")
+    @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0, custom_id="unified_toggle_btn")
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        uname = interaction.user.display_name
         
         with data_lock:
-            if self.username in active_users:
-                active_users.remove(self.username)
-                self.is_active = False
+            if uname in active_users:
+                active_users.remove(uname)
             else:
-                active_users.add(self.username)
-                self.is_active = True
-            save_data()
+                active_users.add(uname)
+            swift_save_data()
         
         self.update_button_styles()
-        await self.update_response(interaction)
+        await self.update_message(interaction, uname)
 
-    @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0, custom_id="persistent_game_mode_btn")
+    @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0, custom_id="unified_game_mode_btn")
     async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        uname = interaction.user.display_name
+        
         with data_lock:
-            current_gm = user_game_modes.get(self.username, False)
-            user_game_modes[self.username] = not current_gm
-            save_data()
+            current_gm = user_game_modes.get(uname, False)
+            user_game_modes[uname] = not current_gm
+            swift_save_data()
+        
         self.update_button_styles()
-        await self.update_response(interaction)
+        await self.update_message(interaction, uname)
 
-    @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1, custom_id="persistent_left_btn")
+    @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1, custom_id="unified_left_btn")
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        uname = interaction.user.display_name
+        
         with data_lock:
-            user_positions[self.username] = "left"
-            save_data()
+            user_positions[uname] = "left"
+            swift_save_data()
+        
         self.update_button_styles()
-        await self.update_response(interaction)
+        await self.update_message(interaction, uname)
 
-    @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1, custom_id="persistent_center_btn")
+    @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1, custom_id="unified_center_btn")
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        uname = interaction.user.display_name
+        
         with data_lock:
-            user_positions[self.username] = "center"
-            save_data()
+            user_positions[uname] = "center"
+            swift_save_data()
+        
         self.update_button_styles()
-        await self.update_response(interaction)
+        await self.update_message(interaction, uname)
 
-    @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1, custom_id="persistent_right_btn")
+    @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1, custom_id="unified_right_btn")
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        uname = interaction.user.display_name
+        
         with data_lock:
-            user_positions[self.username] = "right"
-            save_data()
+            user_positions[uname] = "right"
+            swift_save_data()
+        
         self.update_button_styles()
-        await self.update_response(interaction)
+        await self.update_message(interaction, uname)
 
-    async def update_response(self, interaction):
-        with data_lock:
-            count = len(active_users)
-            users_str = ", ".join(f"**{u}**" for u in active_users) if count > 0 else "_Personne_"
-        
-        current_pos = user_positions.get(self.username, 'center').upper()
-        gm_status = "OUI" if user_game_modes.get(self.username, False) else "NON"
-        
-        content = (
-            f"📊 **Statut en direct** : {count} actif(s) | 👤 **Connectés** : {users_str}\n"
-            f"{'🟢 **Ton Live Chat est ACTIF !**' if self.is_active else '🔴 **Ton Live Chat est DÉSACTIVÉ.**'} | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
-        )
+    async def update_message(self, interaction, uname):
+        content = get_channel_panel_content(uname)
         try:
             await interaction.message.edit(content=content, view=self)
         except Exception as e:
-            print(f"Erreur mise à jour message : {e}")
+            print(f"Erreur mise à jour message unifié : {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -163,7 +182,7 @@ def is_target_channel(channel):
 
 @bot.event
 async def on_ready():
-    print(f"[DISCORD] Connexion réussie en tant que {bot.user}")
+    print(f"[DISCORD] Connexion réussie en tant que bot ({bot.user})")
 
 @bot.event
 async def on_message(message):
@@ -206,20 +225,21 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Envoi automatique du panneau de contrôle personnel tout en bas à chaque message/média
-        username = message.author.display_name
-        with data_lock:
-            is_active = username in active_users
-            count = len(active_users)
-            users_str = ", ".join(f"**{u}**" for u in active_users) if count > 0 else "_Personne_"
-            current_pos = user_positions.get(username, "center").upper()
-            gm_status = "OUI" if user_game_modes.get(username, False) else "NON"
+        # Nettoyage des anciens panneaux dans l'historique récent pour éviter tout doublon
+        try:
+            async for old_msg in message.channel.history(limit=25):
+                if old_msg.author == bot.user and "Statut en direct" in old_msg.content:
+                    try:
+                        await old_msg.delete()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
-        panel_content = (
-            f"📊 **Statut en direct** : {count} actif(s) | 👤 **Connectés** : {users_str}\n"
-            f"{'🟢 **Ton Live Chat est ACTIF !**' if is_active else '🔴 **Ton Live Chat est DÉSACTIVÉ.**'} | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
-        )
-        view = PersonalControlView(is_active, username)
+        # Envoi du panneau unique tout en bas du salon
+        uname = message.author.display_name
+        panel_content = get_channel_panel_content(uname)
+        view = UnifiedControlView(uname)
         
         try:
             await message.channel.send(content=panel_content, view=view)

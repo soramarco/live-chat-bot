@@ -74,25 +74,15 @@ async def refresh_or_repost_panel(channel):
     content = get_main_panel_content()
     
     try:
-        # Si on a déjà l'objet du message en mémoire, on l'édite directement pour éviter le spam
-        if main_panel_message:
-            try:
-                await main_panel_message.edit(content=content, view=view)
-                return
-            except Exception:
-                main_panel_message = None
-
-        # Recherche d'un message existant dans l'historique récent pour l'éditer au lieu d'en poster un nouveau
-        async for message in channel.history(limit=25):
+        # Supprime tous les anciens panneaux de contrôle pour éviter les doublons dans le salon
+        async for message in channel.history(limit=30):
             if message.author == bot.user and "Panneau de contrôle du Live Chat" in message.content:
                 try:
-                    main_panel_message = message
-                    await message.edit(content=content, view=view)
-                    return
+                    await message.delete()
                 except Exception:
                     pass
-                
-        # S'il n'y en a aucun, on envoie un message unique initial
+
+        # Poste un nouveau panneau tout en bas du salon
         main_panel_message = await channel.send(content, view=view)
     except Exception as e:
         print(f"Erreur rafraîchissement panneau : {e}")
@@ -131,7 +121,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Chargement...", style=discord.ButtonStyle.secondary, row=0)
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
             
         with data_lock:
             if self.username in active_users:
@@ -150,7 +140,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0)
     async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         with data_lock:
             current_gm = user_game_modes.get(self.username, False)
             user_game_modes[self.username] = not current_gm
@@ -163,7 +153,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         with data_lock:
             user_positions[self.username] = "left"
             save_data()
@@ -172,7 +162,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1)
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         with data_lock:
             user_positions[self.username] = "center"
             save_data()
@@ -181,7 +171,7 @@ class PersonalControlView(discord.ui.View):
 
     @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         with data_lock:
             user_positions[self.username] = "right"
             save_data()
@@ -197,7 +187,7 @@ class PersonalControlView(discord.ui.View):
             else f"🔴 **Ton Live Chat est DÉSACTIVÉ.** | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
         )
         try:
-            await interaction.edit_original_response(content=status_text, view=self)
+            await interaction.message.edit(content=status_text, view=self)
         except Exception as e:
             print(f"Erreur mise à jour position/mode jeu : {e}")
 

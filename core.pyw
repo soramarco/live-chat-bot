@@ -88,6 +88,7 @@ class OverlayWindow(QWidget):
         self.video_file = None
         self.current_loaded_url = None
         self.is_transitioning = False
+        self.is_clearing = False
         self.current_max_size = 850
         
         self.float_angle = 0.0
@@ -151,9 +152,10 @@ class OverlayWindow(QWidget):
         self.image_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.image_label)
 
-        # Widget vidéo natif PyQtMultimedia
+        # Widget vidéo natif PyQtMultimedia avec fond opaque pour forcer le rendu de l'image sous Windows
         self.video_widget = QVideoWidget(self.container)
         self.video_widget.setFixedSize(850, 480)
+        self.video_widget.setStyleSheet("background: black; border-radius: 8px;")
         container_layout.addWidget(self.video_widget)
         self.video_widget.hide()
 
@@ -338,7 +340,9 @@ class OverlayWindow(QWidget):
 
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
                 self.container.show()
-                self.media_player.play()
+                
+                # Délai léger pour permettre à la surface vidéo de s'initialiser correctement à l'écran sous Windows
+                QTimer.singleShot(150, self.media_player.play)
                 print("[VIDEO] Lecture démarrée.")
                 self.close_timer.stop()
             else:

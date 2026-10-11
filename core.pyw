@@ -2,19 +2,18 @@ import sys
 import time
 import math
 import requests
-from io import BytesIO
 import tempfile
 import os
 import threading
-import json
 
-from PyQt5.QtCore import Qt, QTimer, QUrl
+from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF
 from PyQt5.QtGui import QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QGraphicsOpacityEffect
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QGraphicsDropShadowEffect, QLineEdit, QPushButton, QGraphicsOpacityEffect, QMessageBox, QGraphicsView, QGraphicsScene
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-from PyQt5.QtMultimediaWidgets import QVideoWidget
+from PyQt5.QtMultimediaWidgets import QGraphicsVideoItem
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
+LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.lock")
 SERVER_URL = "https://live-chat-bot-ctus.onrender.com/get_next_meme"
 POP_URL = "https://live-chat-bot-ctus.onrender.com/pop_meme"
 
@@ -147,20 +146,29 @@ class OverlayWindow(QWidget):
         header_layout.addWidget(self.author_label)
         container_layout.addWidget(self.header_widget)
         
-        # Label pour les images fixes
         self.image_label = QLabel(self.container)
         self.image_label.setAlignment(Qt.AlignCenter)
         container_layout.addWidget(self.image_label)
 
-        # Widget vidéo natif PyQtMultimedia avec fond opaque pour forcer le rendu sous Windows
-        self.video_widget = QVideoWidget(self.container)
-        self.video_widget.setFixedSize(850, 480)
-        self.video_widget.setStyleSheet("background: black; border-radius: 8px;")
-        container_layout.addWidget(self.video_widget)
-        self.video_widget.hide()
+        # Utilisation d'une vue graphique (Graphics View) pour un rendu vidéo fluide et sans bug de transparence Windows
+        self.graphics_view = QGraphicsView(self.container)
+        self.graphics_view.setFixedSize(850, 480)
+        self.graphics_view.setStyleSheet("background: transparent; border: none;")
+        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        self.scene = QGraphicsScene(self.graphics_view)
+        self.graphics_view.setScene(self.scene)
+        
+        self.video_item = QGraphicsVideoItem()
+        self.scene.addItem(self.video_item)
+        self.video_item.setSize(QRectF(0, 0, 850, 480).size())
+
+        container_layout.addWidget(self.graphics_view)
+        self.graphics_view.hide()
 
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
-        self.media_player.setVideoOutput(self.video_widget)
+        self.media_player.setVideoOutput(self.video_item)
         self.media_player.stateChanged.connect(self.media_state_changed)
 
         self.text_label = QLabel(self.container)
@@ -210,19 +218,17 @@ class OverlayWindow(QWidget):
             self.main_layout.addStretch(1)
 
     def init_network(self):
-        print("[NETWORK] Initialisation du thread réseau...")
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
 
     def network_worker(self):
-        print(f"[NETWORK] Thread démarré pour : {self.discord_pseudo}")
         while True:
             try:
                 res = requests.get(f"{SERVER_URL}?user={self.discord_pseudo}", timeout=3)
                 if res.status_code == 200:
                     data = res.json()
                     if data.get("status") == "inactive":
-                        print("[NETWORK] Statut inactif, fermeture.")
+                        print("[NETWORK] Statut inactif sur Discord, fermeture automatique...")
                         QTimer.singleShot(0, QApplication.quit)
                         break
 
@@ -237,7 +243,6 @@ class OverlayWindow(QWidget):
                     elif new_url != self.current_loaded_url and not self.is_transitioning:
                         self.is_transitioning = True
                         self.current_loaded_url = new_url
-                        print(f"[NETWORK] Nouveau média reçu : {new_url}")
                         
                         media_res = requests.get(new_url, timeout=15)
                         if media_res.status_code == 200:
@@ -258,26 +263,26 @@ class OverlayWindow(QWidget):
                 else:
                     time.sleep(1.5)
             except Exception as e:
-                print(f"[NETWORK Erreur] {e}")
                 time.sleep(2)
 
     def handle_new_media(self, data):
         try:
-            print("[UI] Affichage du média dans l'interface...")
             self.media_player.stop()
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
             
             if is_game_mode:
                 self.current_max_size = 380
-                self.video_widget.setFixedSize(380, 215)
+                self.graphics_view.setFixedSize(380, 215)
+                self.video_item.setSize(QRectF(0, 0, 380, 215).size())
                 self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
                 self.text_label.setMaximumWidth(380)
                 avatar_size = 26
             else:
                 self.current_max_size = 850
-                self.video_widget.setFixedSize(850, 480)
+                self.graphics_view.setFixedSize(850, 480)
+                self.video_item.setSize(QRectF(0, 0, 850, 480).size())
                 self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
                 self.text_label.setMaximumWidth(850)
@@ -316,9 +321,8 @@ class OverlayWindow(QWidget):
             is_vid = any(ext in url.lower() for ext in [".mp4", ".mov", ".webm", ".avi"])
 
             if is_vid:
-                print("[VIDEO] Lancement du lecteur vidéo natif...")
                 self.image_label.hide()
-                self.video_widget.show()
+                self.graphics_view.show()
 
                 if self.video_file and os.path.exists(self.video_file.name):
                     try:
@@ -340,14 +344,10 @@ class OverlayWindow(QWidget):
 
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
                 self.container.show()
-                
-                # Délai léger pour permettre à la surface vidéo de s'initialiser correctement à l'écran sous Windows
-                QTimer.singleShot(150, self.media_player.play)
-                print("[VIDEO] Lecture démarrée.")
+                QTimer.singleShot(100, self.media_player.play)
                 self.close_timer.stop()
             else:
-                print("[IMAGE] Affichage de l'image fixe...")
-                self.video_widget.hide()
+                self.graphics_view.hide()
                 self.image_label.show()
 
                 image = QImage.fromData(content)
@@ -359,14 +359,12 @@ class OverlayWindow(QWidget):
                 self.container.show()
                 self.close_timer.start(7000)
         except Exception as e:
-            print(f"[UI Erreur] {e}")
             self.hide_overlay_ui()
         finally:
             self.is_transitioning = False
 
     def media_state_changed(self, state):
         if state == QMediaPlayer.EndOfMedia:
-            print("[VIDEO] Fin de la lecture vidéo.")
             self.finish_media_playback()
 
     def finish_media_playback(self):
@@ -385,7 +383,7 @@ class OverlayWindow(QWidget):
     def hide_overlay_ui(self):
         self.media_player.stop()
         self.image_label.clear()
-        self.video_widget.hide()
+        self.graphics_view.hide()
         self.image_label.hide()
         self.author_label.clear()
         self.avatar_label.clear()
@@ -406,16 +404,45 @@ class OverlayWindow(QWidget):
 
 def main():
     app = QApplication(sys.argv)
+    
+    # Vérification anti-double instance (si le fichier lock existe déjà)
+    if os.path.exists(LOCK_FILE):
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Live Chat déjà actif")
+        msg.setText("Le live chat est déjà actif sur le PC !")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec_()
+        sys.exit(0)
+        
+    try:
+        with open(LOCK_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except:
+        pass
+
     setup = SetupDialog()
     setup.show()
     app.exec_()
     
     if not setup.pseudo:
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
         sys.exit(0)
 
     overlay = OverlayWindow(setup.pseudo)
     overlay.show()
-    sys.exit(app.exec_())
+    
+    exit_code = app.exec_()
+    
+    # Nettoyage du fichier lock à la fermeture
+    if os.path.exists(LOCK_FILE):
+        try:
+            os.remove(LOCK_FILE)
+        except:
+            pass
+            
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()

@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-11-native-opaque-video-v3-lower-position")
+log("CORE_BUILD_ID=2026-10-11-core-resident-no-monitor-v4")
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
@@ -798,9 +798,10 @@ class OverlayWindow(QWidget):
         count_404 = 0
         fail_url = None
         fail_count = 0
-        # Le cœur est le processus d'affichage, pas le moniteur d'activation.
-        # À l'état inactif il se ferme; live_chat_monitor.pyw reste chargé de
-        # surveiller le serveur et de le relancer lors de la prochaine activation.
+        # Le launcher déjà distribué ne fait que démarrer ce cœur une fois.
+        # Pour éviter un deuxième programme de surveillance, le cœur reste en
+        # arrière-plan quand le Live Chat est inactif et ne masque que l'overlay.
+        # Ainsi, une prochaine activation sera détectée sans modifier le launcher.
         server_was_inactive = False
 
         while True:
@@ -810,13 +811,12 @@ class OverlayWindow(QWidget):
                 if res.status_code == 404:
                     count_404 += 1
                     if count_404 >= 3 and not server_was_inactive:
-                        log("Serveur HTTP 404 répété : fermeture du cœur local; le moniteur de lancement reste actif")
+                        log("Serveur HTTP 404 répété : overlay masqué; le cœur reste en attente et réessaie")
                         server_was_inactive = True
                         with self._network_state_lock:
                             self._network_active_key = None
                             self._network_last_done_key = None
-                        self.request_quit("le serveur Live Chat renvoie HTTP 404 à répétition")
-                        return
+                        self.hide_requested.emit()
                     time.sleep(1.5)
                     continue
                 count_404 = 0
@@ -838,17 +838,17 @@ class OverlayWindow(QWidget):
 
                 if self._is_inactive(data):
                     if not server_was_inactive:
-                        log("Live Chat inactif : fermeture complète de core.pyw; le moniteur local relancera le cœur à la prochaine activation")
+                        log("Live Chat désactivé : overlay et média masqués; le cœur reste en attente de la prochaine activation")
                         server_was_inactive = True
                         with self._network_state_lock:
                             self._network_active_key = None
                             self._network_last_done_key = None
-                        self.request_quit("le serveur dit que le Live Chat est inactif")
-                    return
+                        self.hide_requested.emit()
+                    time.sleep(1.2)
+                    continue
 
-                # Le cœur n'est démarré par le moniteur que lorsque le Live Chat
-                # est actif. Si le statut passe à inactif, le cœur quitte; le
-                # moniteur local séparé détectera une future réactivation.
+                # Le processus reste vivant pendant l'état inactif. Dès que le
+                # serveur repasse actif, ce même cœur reçoit les nouveaux médias.
                 server_was_inactive = False
 
                 self.settings_ready.emit({

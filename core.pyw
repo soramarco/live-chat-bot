@@ -180,6 +180,7 @@ class FrameSurface(QAbstractVideoSurface):
         super().__init__(parent)
         self.target_size = (850, 480)
         self._img_fmt = QImage.Format_Invalid
+        self._count = 0
 
     def supportedPixelFormats(self, handle_type=QAbstractVideoBuffer.NoHandle):
         if handle_type == QAbstractVideoBuffer.NoHandle:
@@ -199,6 +200,7 @@ class FrameSurface(QAbstractVideoSurface):
             log(f"Format vidéo non géré : {fmt.pixelFormat()}")
             return False
         self._img_fmt = img_fmt
+        self._count = 0
         log(f"Surface vidéo démarrée : {fmt.frameSize().width()}x{fmt.frameSize().height()}")
         return super().start(fmt)
 
@@ -216,8 +218,16 @@ class FrameSurface(QAbstractVideoSurface):
                 img = img.mirrored(False, True)
             w, h = self.target_size
             img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # copie indépendante
+            # Certains lecteurs mettent la transparence à 0 : sur une fenêtre transparente
+            # l'image devient alors invisible. On force une image 100% opaque.
+            img = img.convertToFormat(QImage.Format_RGB32)
         finally:
             clone.unmap()
+        self._count += 1
+        if self._count in (1, 2, 10, 60, 300):
+            px = img.pixel(img.width() // 2, img.height() // 2)
+            log(f"Image vidéo n°{self._count} : {img.width()}x{img.height()}, "
+                f"format source {self._img_fmt}, pixel central {px & 0xFFFFFFFF:08X}")
         self.frame_ready.emit(img)
         return True
 

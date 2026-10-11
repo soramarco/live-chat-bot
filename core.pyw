@@ -99,7 +99,6 @@ class OverlayWindow(QWidget):
         self.init_network()
 
     def init_ui(self):
-        # Fenêtre sans bord, toujours au premier plan, transparente
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -188,10 +187,7 @@ class OverlayWindow(QWidget):
         self.main_layout.addStretch(1)
         self.main_layout.addWidget(self.container)
         self.main_layout.addStretch(1)
-        
-        # On garde le conteneur visible en permanence mais totalement transparent/vide au début 
-        # pour s'assurer que la fenêtre PyQt réagit bien aux événements et s'affiche sur l'écran
-        self.container.show()
+        self.container.hide()
 
         self.close_timer = QTimer(self)
         self.close_timer.setSingleShot(True)
@@ -229,9 +225,13 @@ class OverlayWindow(QWidget):
             try:
                 url_query = f"{SERVER_URL}?user={requests.utils.quote(self.discord_pseudo)}"
                 res = requests.get(url_query, timeout=3)
+                
                 if res.status_code == 200:
                     data = res.json()
-                    if data.get("status") == "inactive":
+                    
+                    # Sécurité large pour détecter l'inactivité (statut explicitement inactif ou données vides/absentes)
+                    status = data.get("status")
+                    if status == "inactive" or status == False or data.get("active") == False:
                         if os.path.exists(LOCK_FILE):
                             try:
                                 os.remove(LOCK_FILE)
@@ -267,6 +267,14 @@ class OverlayWindow(QWidget):
                             self.is_transitioning = False
                     else:
                         time.sleep(1.5)
+                elif res.status_code == 404:
+                    # Si l'utilisateur n'est plus trouvé sur le serveur, on ferme tout net
+                    if os.path.exists(LOCK_FILE):
+                        try:
+                            os.remove(LOCK_FILE)
+                        except:
+                            pass
+                    os._exit(0)
                 else:
                     time.sleep(1.5)
             except Exception as e:
@@ -351,6 +359,7 @@ class OverlayWindow(QWidget):
 
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
                 self.container.show()
+                self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
                 self.close_timer.stop()
             else:
@@ -364,6 +373,7 @@ class OverlayWindow(QWidget):
                 
                 self.image_label.setPixmap(pixmap)
                 self.container.show()
+                self.raise_()
                 self.close_timer.start(7000)
         except Exception as e:
             self.hide_overlay_ui()
@@ -395,8 +405,7 @@ class OverlayWindow(QWidget):
         self.author_label.clear()
         self.avatar_label.clear()
         self.text_label.clear()
-        # On garde le conteneur actif pour que la fenêtre ne disparaisse pas totalement de l'écran
-        self.container.show()
+        self.container.hide()
         
         if self.video_file and os.path.exists(self.video_file.name):
             try:

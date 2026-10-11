@@ -6,7 +6,8 @@ import json
 import tempfile
 import threading
 import traceback
-from urllib.parse import urlparse
+import io
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import requests
 
@@ -49,8 +50,10 @@ _reset_log()
 log("=== Démarrage core.pyw ===")
 
 try:
-    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, pyqtSignal
-    from PyQt5.QtGui import QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QRectF, QPointF, QSize, pyqtSignal
+    from PyQt5.QtGui import (
+        QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
+    )
     from PyQt5.QtWidgets import (
         QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
         QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox,
@@ -70,6 +73,10 @@ SERVER_URL = BASE_URL + "/get_next_meme"
 POP_URL = BASE_URL + "/pop_meme"
 
 VIDEO_EXTS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
+
+
+class UnsupportedMedia(Exception):
+    pass
 
 # ---------------------------------------------------------------------------
 # UNE SEULE INSTANCE (mutex Windows : disparait tout seul si le process meurt)
@@ -167,6 +174,94 @@ def create_discord_avatar_with_ring(pixmap, size=40):
 
 
 
+
+# ---------------------------------------------------------------------------
+# EN-TETE (avatar + pseudo) AVEC FLOTTEMENT FLUIDE
+# Dessiné à la main : le mouvement se fait au sous-pixel, à ~60 images/s,
+# sans recalcul de mise en page (l'ancienne version bougeait de 1 pixel entiers).
+# ---------------------------------------------------------------------------
+class FloatingHeader(QWidget):
+    PAD = 6
+    GAP = 10
+    AMP = 4.0      # amplitude du flottement en pixels
+    SPEED = 2.4    # vitesse (radians/seconde) : plus petit = plus lent
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._avatar = None
+        self._text = ""
+        self._font = QFont("Segoe UI", 20, QFont.Bold)
+        self._t0 = time.monotonic()
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self.update)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+    def set_content(self, text, avatar, font):
+        self._text = text
+        self._avatar = avatar
+        self._font = font
+        self.updateGeometry()
+        self.update()
+
+    def clear_content(self):
+        self._text = ""
+        self._avatar = None
+        self.updateGeometry()
+        self.update()
+
+    def _text_width(self, fm):
+        try:
+            return fm.horizontalAdvance(self._text)
+        except AttributeError:
+            return fm.width(self._text)
+
+    def sizeHint(self):
+        if not self._text and not self._avatar:
+            return QSize(0, 0)
+        fm = QFontMetrics(self._font)
+        text_w = self._text_width(fm) if self._text else 0
+        av_w = self._avatar.width() if self._avatar else 0
+        av_h = self._avatar.height() if self._avatar else 0
+        gap = self.GAP if (self._avatar and self._text) else 0
+        w = av_w + gap + text_w + 2 * self.PAD + 6
+        h = int(max(av_h, fm.height()) + 2 * self.PAD + 2 * self.AMP)
+        return QSize(w, h)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def showEvent(self, event):
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        if not self._text and not self._avatar:
+            return
+        p = QPainter(self)
+        p.setRenderHints(
+            QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
+        offset = math.sin((time.monotonic() - self._t0) * self.SPEED) * self.AMP
+        fm = QFontMetrics(self._font)
+        cy = self.height() / 2.0 + offset
+        x = self.PAD + 3.0
+        if self._avatar:
+            p.drawPixmap(QPointF(x, cy - self._avatar.height() / 2.0), self._avatar)
+            x += self._avatar.width() + self.GAP
+        if self._text:
+            baseline = cy - fm.height() / 2.0 + fm.ascent()
+            path = QPainterPath()
+            path.addText(QPointF(x, baseline), self._font, self._text)
+            p.setPen(QPen(QColor(0, 0, 0, 220), 3.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+            p.fillPath(path, QBrush(QColor(255, 255, 255)))
+        p.end()
+
 # ---------------------------------------------------------------------------
 # AFFICHAGE VIDEO IMAGE PAR IMAGE
 # QGraphicsVideoItem / QVideoWidget ne s'affichent pas dans une fenêtre
@@ -252,11 +347,6 @@ class OverlayWindow(QWidget):
         self.media_ready.connect(self.handle_new_media)
         self.hide_requested.connect(self.hide_overlay_ui)
 
-        self.float_angle = 0.0
-        self.float_timer = QTimer(self)
-        self.float_timer.timeout.connect(self.animate_floating_header)
-        self.float_timer.start(30)
-
         self.init_ui()
         self.init_network()
 
@@ -279,25 +369,8 @@ class OverlayWindow(QWidget):
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
 
-        self.header_widget = QWidget(self.container)
-        header_layout = QHBoxLayout(self.header_widget)
-        header_layout.setAlignment(Qt.AlignCenter)
-        header_layout.setSpacing(10)
-
-        self.avatar_label = QLabel(self.header_widget)
-        header_layout.addWidget(self.avatar_label)
-
-        self.author_label = QLabel(self.header_widget)
-        self.author_label.setAlignment(Qt.AlignCenter)
-        self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
-        self.author_label.setStyleSheet("color: white;")
-        shadow_pseudo = QGraphicsDropShadowEffect()
-        shadow_pseudo.setBlurRadius(3)
-        shadow_pseudo.setColor(QColor(0, 0, 0, 255))
-        shadow_pseudo.setOffset(1, 1)
-        self.author_label.setGraphicsEffect(shadow_pseudo)
-        header_layout.addWidget(self.author_label)
-        container_layout.addWidget(self.header_widget)
+        self.header = FloatingHeader(self.container)
+        container_layout.addWidget(self.header)
 
         self.image_label = QLabel(self.container)
         self.image_label.setAlignment(Qt.AlignCenter)
@@ -343,8 +416,7 @@ class OverlayWindow(QWidget):
 
     # ---- petit message de test au démarrage -------------------------------
     def show_notice(self, text, ms=4000):
-        self.author_label.clear()
-        self.avatar_label.hide()
+        self.header.clear_content()
         self.image_label.hide()
         self.video_label.hide()
         self.text_label.setText(text)
@@ -357,12 +429,6 @@ class OverlayWindow(QWidget):
         if self.current_loaded_url is None:
             self.text_label.clear()
             self.container.hide()
-
-    def animate_floating_header(self):
-        if self.container.isVisible():
-            self.float_angle += 0.08
-            offset_y = int(math.sin(self.float_angle) * 3)
-            self.header_widget.setContentsMargins(0, offset_y, 0, -offset_y)
 
     def update_alignment(self, position):
         while self.main_layout.count():
@@ -391,6 +457,41 @@ class OverlayWindow(QWidget):
         if status is False or data.get("active") is False:
             return True
         return False
+
+    def _make_displayable_image(self, session, url, content):
+        """Renvoie des octets d'image lisibles par Qt, ou None (ex : AVIF non géré par Qt)."""
+        if not QImage.fromData(content).isNull():
+            return content
+
+        # 1) Pillow, s'il est installé (les versions récentes lisent l'AVIF)
+        try:
+            from PIL import Image
+            im = Image.open(io.BytesIO(content)).convert("RGBA")
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            png = buf.getvalue()
+            if not QImage.fromData(png).isNull():
+                log("Image convertie avec Pillow")
+                return png
+        except Exception as e:
+            log(f"Conversion Pillow impossible : {e}")
+
+        # 2) conversion par le proxy de Discord (format=png)
+        try:
+            parts = urlparse(url)
+            if parts.netloc in ("cdn.discordapp.com", "media.discordapp.net"):
+                query = dict(parse_qsl(parts.query))
+                query["format"] = "png"
+                new_url = urlunparse(parts._replace(netloc="media.discordapp.net",
+                                                    query=urlencode(query)))
+                r = session.get(new_url, timeout=15)
+                if r.status_code == 200 and not QImage.fromData(r.content).isNull():
+                    log("Image convertie via le proxy Discord")
+                    return r.content
+                log(f"Proxy Discord : HTTP {r.status_code}, image inutilisable")
+        except Exception as e:
+            log(f"Conversion via proxy impossible : {e}")
+        return None
 
     def request_quit(self, reason):
         log("Fermeture demandée : " + reason)
@@ -461,6 +562,15 @@ class OverlayWindow(QWidget):
                     data["content_type"] = media_res.headers.get("Content-Type", "")
                     log(f"Média téléchargé ({len(media_res.content)} octets, {data['content_type']})")
 
+                    url_path = urlparse(new_url).path.lower()
+                    is_video = data["content_type"].lower().startswith("video/") or url_path.endswith(VIDEO_EXTS)
+                    if not is_video:
+                        displayable = self._make_displayable_image(session, new_url, media_res.content)
+                        if displayable is None:
+                            raise UnsupportedMedia(
+                                "format d'image non supporté (" + data["content_type"] + ")")
+                        data["content_bytes"] = displayable
+
                     avatar_url = data.get("avatar", "")
                     if avatar_url:
                         try:
@@ -471,6 +581,12 @@ class OverlayWindow(QWidget):
                             pass
                     fail_url, fail_count = None, 0
                     self.media_ready.emit(data)
+                except UnsupportedMedia as e:
+                    log(f"Média ignoré : {e}")
+                    self.last_done_url = new_url
+                    self.current_loaded_url = None
+                    self._send_pop_request()
+                    fail_url, fail_count = None, 0
                 except Exception as e:
                     log(f"Échec média : {e}")
                     self.current_loaded_url = None
@@ -503,14 +619,14 @@ class OverlayWindow(QWidget):
             if is_game_mode:
                 self.current_max_size = 380
                 self.set_video_box(380, 215)
-                self.author_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
+                header_font = QFont("Segoe UI", 13, QFont.Bold)
                 self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
                 self.text_label.setMaximumWidth(380)
                 avatar_size = 26
             else:
                 self.current_max_size = 850
                 self.set_video_box(850, 480)
-                self.author_label.setFont(QFont("Segoe UI", 20, QFont.Bold))
+                header_font = QFont("Segoe UI", 20, QFont.Bold)
                 self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
                 self.text_label.setMaximumWidth(850)
                 avatar_size = 40
@@ -531,18 +647,14 @@ class OverlayWindow(QWidget):
             else:
                 self.text_label.hide()
 
-            self.author_label.setText(str(author))
-            self.author_label.show()
-
+            avatar_pix = None
             avatar_bytes = data.get("avatar_bytes")
             if avatar_bytes:
                 img = QImage.fromData(avatar_bytes)
                 pix = QPixmap.fromImage(img)
-                self.avatar_label.setPixmap(create_discord_avatar_with_ring(pix, size=avatar_size))
-                self.avatar_label.show()
-            else:
-                self.avatar_label.clear()
-                self.avatar_label.hide()
+                if not pix.isNull():
+                    avatar_pix = create_discord_avatar_with_ring(pix, size=avatar_size)
+            self.header.set_content(str(author), avatar_pix, header_font)
 
             content = data.get("content_bytes")
             path = urlparse(url).path.lower()
@@ -643,8 +755,7 @@ class OverlayWindow(QWidget):
         self.image_label.clear()
         self.video_label.hide()
         self.image_label.hide()
-        self.author_label.clear()
-        self.avatar_label.clear()
+        self.header.clear_content()
         self.text_label.clear()
         self.container.hide()
         self._cleanup_video_file()

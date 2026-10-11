@@ -1,7 +1,6 @@
 import hashlib
 import sys
 import time
-import math
 import requests
 from io import BytesIO
 import tempfile
@@ -236,16 +235,6 @@ class OverlayWindow(QWidget):
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self.update_video_frame)
 
-    def setup_float_animation(self):
-        # Animation douce et lente du header (mouvement très subtil de haut en bas sans casser le layout)
-        self.float_anim = QPropertyAnimation(self.header_widget, b"pos")
-        self.float_anim.setDuration(2500)
-        current_pos = self.header_widget.pos()
-        self.float_anim.setStartValue(current_pos)
-        self.float_anim.setEndValue(current_pos + Qt.QPoint(0, -5))
-        self.float_anim.setEasingCurve(QEasingCurve.InOutSine)
-        self.float_anim.setLoopCount(-1)
-
     def on_media_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia:
             print("[PLAYBACK] Fin de la lecture audio/vidéo atteinte.")
@@ -350,11 +339,12 @@ class OverlayWindow(QWidget):
             position = data.get("position", "center")
             is_game_mode = data.get("game_mode", False)
             
+            # Application stricte de la taille selon le Mode Jeu
             if is_game_mode:
-                self.current_max_size = 450
+                self.current_max_size = 400
                 self.author_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
                 self.text_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
-                self.text_label.setMaximumWidth(450)
+                self.text_label.setMaximumWidth(400)
                 avatar_size = 28
             else:
                 self.current_max_size = 850
@@ -424,7 +414,7 @@ class OverlayWindow(QWidget):
                 
                 self.container.show()
                 
-                # Animation de fondu d'entrée unique (Fade-in 350ms)
+                # Fondu d'entrée unique (Fade-in 350ms)
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
                 self.fade_animation.setDuration(350)
                 self.fade_animation.setStartValue(0.0)
@@ -448,7 +438,7 @@ class OverlayWindow(QWidget):
                 self.media_display_label.setPixmap(pixmap)
                 self.container.show()
                 
-                # Animation de fondu d'entrée unique (Fade-in 350ms)
+                # Fondu d'entrée unique (Fade-in 350ms)
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
                 self.fade_animation.setDuration(350)
                 self.fade_animation.setStartValue(0.0)

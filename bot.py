@@ -52,33 +52,29 @@ load_data()
 def home():
     return "Bot is alive!", 200
 
-def get_channel_panel_content(username):
+def get_channel_panel_content():
     with data_lock:
         count = len(active_users)
         users_str = ", ".join(f"**{u}**" for u in active_users) if count > 0 else "_Personne_"
-        is_active = username in active_users
-        current_pos = user_positions.get(username, "center").upper()
-        gm_status = "OUI" if user_game_modes.get(username, False) else "NON"
 
-    status_str = "🟢 **Ton Live Chat est ACTIF !**" if is_active else "🔴 **Ton Live Chat est DÉSACTIVÉ.**"
-    
     return (
         f"📊 **Statut en direct** : {count} actif(s)\n"
         f"👤 **Connectés** : {users_str}\n\n"
-        f"{status_str} | Position : **{current_pos}** | Mode Jeu : **{gm_status}**"
+        "👇 **Gère ton Live Chat ci-dessous :**"
     )
 
 class UnifiedControlView(discord.ui.View):
-    def __init__(self, username):
+    def __init__(self, username=None):
         super().__init__(timeout=None)
         self.username = username
         self.update_button_styles()
 
     def update_button_styles(self):
+        uname = self.username if self.username else "Utilisateur"
         with data_lock:
-            is_active = self.username in active_users
-            is_gm = user_game_modes.get(self.username, False)
-            pos = user_positions.get(self.username, "center")
+            is_active = uname in active_users
+            is_gm = user_game_modes.get(uname, False)
+            pos = user_positions.get(uname, "center")
 
         if is_active:
             self.toggle_btn.label = "Désactiver mon Live Chat"
@@ -106,6 +102,7 @@ class UnifiedControlView(discord.ui.View):
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         uname = interaction.user.display_name
+        self.username = uname
         
         with data_lock:
             if uname in active_users:
@@ -115,12 +112,13 @@ class UnifiedControlView(discord.ui.View):
             swift_save_data()
         
         self.update_button_styles()
-        await self.update_message(interaction, uname)
+        await self.update_message(interaction)
 
     @discord.ui.button(label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary, row=0, custom_id="unified_game_mode_btn")
     async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         uname = interaction.user.display_name
+        self.username = uname
         
         with data_lock:
             current_gm = user_game_modes.get(uname, False)
@@ -128,46 +126,49 @@ class UnifiedControlView(discord.ui.View):
             swift_save_data()
         
         self.update_button_styles()
-        await self.update_message(interaction, uname)
+        await self.update_message(interaction)
 
     @discord.ui.button(label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1, custom_id="unified_left_btn")
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         uname = interaction.user.display_name
+        self.username = uname
         
         with data_lock:
             user_positions[uname] = "left"
             swift_save_data()
         
         self.update_button_styles()
-        await self.update_message(interaction, uname)
+        await self.update_message(interaction)
 
     @discord.ui.button(label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary, row=1, custom_id="unified_center_btn")
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         uname = interaction.user.display_name
+        self.username = uname
         
         with data_lock:
             user_positions[uname] = "center"
             swift_save_data()
         
         self.update_button_styles()
-        await self.update_message(interaction, uname)
+        await self.update_message(interaction)
 
     @discord.ui.button(label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary, row=1, custom_id="unified_right_btn")
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         uname = interaction.user.display_name
+        self.username = uname
         
         with data_lock:
             user_positions[uname] = "right"
             swift_save_data()
         
         self.update_button_styles()
-        await self.update_message(interaction, uname)
+        await self.update_message(interaction)
 
-    async def update_message(self, interaction, uname):
-        content = get_channel_panel_content(uname)
+    async def update_message(self, interaction):
+        content = get_channel_panel_content()
         try:
             await interaction.message.edit(content=content, view=self)
         except Exception as e:
@@ -180,9 +181,29 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 def is_target_channel(channel):
     return channel.id == TARGET_CHANNEL_ID
 
+async def repost_bottom_panel(channel):
+    try:
+        async for old_msg in channel.history(limit=30):
+            if old_msg.author == bot.user and "Statut en direct" in old_msg.content:
+                try:
+                    await old_msg.delete()
+                except Exception:
+                    pass
+
+        content = get_channel_panel_content()
+        view = UnifiedControlView()
+        await channel.send(content=content, view=view)
+    except Exception as e:
+        print(f"Erreur repost panneau bas : {e}")
+
 @bot.event
 async def on_ready():
     print(f"[DISCORD] Connexion réussie en tant que bot ({bot.user})")
+    bot.add_view(UnifiedControlView())
+    
+    channel = bot.get_channel(TARGET_CHANNEL_ID)
+    if channel:
+        await repost_bottom_panel(channel)
 
 @bot.event
 async def on_message(message):
@@ -225,26 +246,7 @@ async def on_message(message):
 
             bot.loop.create_task(send_control_message(item, is_active=is_first))
 
-        # Nettoyage des anciens panneaux dans l'historique récent pour éviter tout doublon
-        try:
-            async for old_msg in message.channel.history(limit=25):
-                if old_msg.author == bot.user and "Statut en direct" in old_msg.content:
-                    try:
-                        await old_msg.delete()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # Envoi du panneau unique tout en bas du salon
-        uname = message.author.display_name
-        panel_content = get_channel_panel_content(uname)
-        view = UnifiedControlView(uname)
-        
-        try:
-            await message.channel.send(content=panel_content, view=view)
-        except Exception as e:
-            print(f"Erreur envoi panneau bas de salon : {e}")
+        await repost_bottom_panel(message.channel)
 
     await bot.process_commands(message)
 

@@ -412,6 +412,13 @@ class OverlayWindow(QWidget):
                 self.video_file.flush()
                 self.video_file.close()
                 
+                # Initialisation de QMediaPlayer
+                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
+                self.media_player.setVolume(100)
+                self.media_player.play()
+
+                # Micro-délai pour laisser le handle de fichier se stabiliser sous Windows
+                time.sleep(0.05)
                 self.video_capture = cv2.VideoCapture(self.video_file.name)
                 
                 file_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
@@ -429,10 +436,6 @@ class OverlayWindow(QWidget):
                 self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)
                 self.fade_animation.start()
 
-                self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_file.name)))
-                self.media_player.setVolume(100)
-                self.media_player.play()
-                
                 self.video_timer.start(int(1000 / self.fps))
                 self.close_timer.stop()
             else:
@@ -471,7 +474,8 @@ class OverlayWindow(QWidget):
             qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
             self.signals.video_frame_ready.emit(qt_image)
         else:
-            self.video_timer.stop()
+            if self.media_player.state() != QMediaPlayer.PlayingState:
+                self.video_timer.stop()
 
     def display_frame(self, image):
         pixmap = QPixmap.fromImage(image)

@@ -382,7 +382,11 @@ class FrameSurface(QAbstractVideoSurface):
                 img = img.mirrored(False, True)
             w, h = self.target_size
             img = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            img = img.convertToFormat(QImage.Format_RGB32)
+            # IMPORTANT : QImage peut encore partager la mémoire de QVideoFrame.
+            # Après clone.unmap(), le buffer est libéré/réutilisé par Qt : cela
+            # provoquait des traînées et des images fantômes superposées en mode jeu.
+            # copy() détache réellement les pixels AVANT de libérer la frame.
+            img = img.convertToFormat(QImage.Format_RGB32).copy()
         finally:
             clone.unmap()
         self._count += 1
@@ -836,18 +840,18 @@ class OverlayWindow(QWidget):
     def on_video_frame(self, img):
         if self.current_loaded_url is None or img is None or img.isNull():
             return
-        pixmap = QPixmap.fromImage(img)
+        # L'image émise par FrameSurface est déjà une copie indépendante du
+        # buffer vidéo et déjà adaptée à la zone vidéo. On ne la rescale pas une
+        # deuxième fois : éviter une copie inutile limite aussi les soucis de
+        # rafraîchissement du QLabel sur les fenêtres transparentes Windows.
+        pixmap = QPixmap.fromImage(img.copy())
         if pixmap.isNull():
             log("Image vidéo reçue mais conversion en QPixmap impossible")
             return
-        # Redimensionne une seconde fois dans la taille réelle du QLabel : cela
-        # évite qu'une frame paysage soit mal rendue en mode normal sur certains PC.
-        target = self.video_label.size()
-        if target.width() > 0 and target.height() > 0:
-            pixmap = pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if not self.video_label.isVisible():
             self.video_label.show()
         self.video_label.setPixmap(pixmap)
+        self.video_label.update()
         self._video_frames_shown += 1
         if self._video_frames_shown == 1:
             log(f"Première image réellement envoyée au QLabel : {pixmap.width()}x{pixmap.height()}")

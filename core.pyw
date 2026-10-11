@@ -145,12 +145,6 @@ class OverlayWindow(QWidget):
         self.is_transitioning = False
         self.current_max_size = 850
         
-        # Variables pour l'animation de lévitation (effet gravitationnel)
-        self.float_angle = 0.0
-        self.float_timer = QTimer(self)
-        self.float_timer.timeout.connect(self.update_floating_animation)
-        self.float_timer.start(30) # Rafraîchissement fluide à ~33 FPS
-        
         self.init_ui()
         self.init_network()
 
@@ -177,7 +171,7 @@ class OverlayWindow(QWidget):
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
         
-        # Effet d'opacité pour le fondu d'entrée uniquement
+        # Effet d'opacité pour le fondu d'entrée
         self.opacity_effect = QGraphicsOpacityEffect(self.container)
         self.container.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
@@ -242,12 +236,15 @@ class OverlayWindow(QWidget):
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self.update_video_frame)
 
-    def update_floating_animation(self):
-        # Crée un mouvement gravitationnel/flottant subtil en modifiant légèrement la position Y du header
-        if self.container.isVisible():
-            self.float_angle += 0.08
-            offset_y = int(math.sin(self.float_angle) * 4) # Amplitude de 4 pixels de haut en bas
-            self.header_widget.move(self.header_widget.x(), offset_y)
+    def setup_float_animation(self):
+        # Animation douce et lente du header (mouvement très subtil de haut en bas sans casser le layout)
+        self.float_anim = QPropertyAnimation(self.header_widget, b"pos")
+        self.float_anim.setDuration(2500)
+        current_pos = self.header_widget.pos()
+        self.float_anim.setStartValue(current_pos)
+        self.float_anim.setEndValue(current_pos + Qt.QPoint(0, -5))
+        self.float_anim.setEasingCurve(QEasingCurve.InOutSine)
+        self.float_anim.setLoopCount(-1)
 
     def on_media_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia:
@@ -427,9 +424,9 @@ class OverlayWindow(QWidget):
                 
                 self.container.show()
                 
-                # Animation de fondu d'entrée uniquement (Fade-in de 400ms)
+                # Animation de fondu d'entrée unique (Fade-in 350ms)
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-                self.fade_animation.setDuration(400)
+                self.fade_animation.setDuration(350)
                 self.fade_animation.setStartValue(0.0)
                 self.fade_animation.setEndValue(1.0)
                 self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)
@@ -451,9 +448,9 @@ class OverlayWindow(QWidget):
                 self.media_display_label.setPixmap(pixmap)
                 self.container.show()
                 
-                # Animation de fondu d'entrée uniquement (Fade-in de 400ms)
+                # Animation de fondu d'entrée unique (Fade-in 350ms)
                 self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-                self.fade_animation.setDuration(400)
+                self.fade_animation.setDuration(350)
                 self.fade_animation.setStartValue(0.0)
                 self.fade_animation.setEndValue(1.0)
                 self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)

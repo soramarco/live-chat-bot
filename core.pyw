@@ -56,7 +56,7 @@ try:
     )
     from PyQt5.QtWidgets import (
         QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
-        QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QLineEdit, QPushButton, QMessageBox, QSizePolicy,
+        QGraphicsDropShadowEffect, QLineEdit, QPushButton, QMessageBox, QSizePolicy,
     )
     from PyQt5.QtMultimedia import (
         QMediaPlayer, QMediaContent, QAbstractVideoSurface, QAbstractVideoBuffer,
@@ -398,6 +398,7 @@ class FrameSurface(QAbstractVideoSurface):
 # ---------------------------------------------------------------------------
 class OverlayWindow(QWidget):
     media_ready = pyqtSignal(dict)
+    settings_ready = pyqtSignal(dict)
     hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
 
@@ -411,9 +412,14 @@ class OverlayWindow(QWidget):
         self.current_max_size = 850
         self._video_frames_shown = 0
         self._fade_animation = None
-        self._opacity_effect = None
+        self.current_position = None
+        self.current_game_mode = None
+        self.current_author = ""
+        self.current_avatar_source = None
+        self._current_image_pixmap = None
 
         self.media_ready.connect(self.handle_new_media)
+        self.settings_ready.connect(self.apply_live_settings)
         self.hide_requested.connect(self.hide_overlay_ui)
 
         self.init_ui()
@@ -432,14 +438,15 @@ class OverlayWindow(QWidget):
         self.main_layout.setContentsMargins(40, 0, 40, 0)
 
         self.container = QWidget(self)
-        self._opacity_effect = QGraphicsOpacityEffect(self.container)
-        self._opacity_effect.setOpacity(1.0)
-        self.container.setGraphicsEffect(self._opacity_effect)
-        self._fade_animation = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+        # Le fondu est appliqué à la fenêtre native, pas au conteneur qui reçoit
+        # les images vidéo. Un effet graphique sur les frames animées peut
+        # laisser des images fantômes sous Windows avec un fond translucide.
+        self._fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
         self._fade_animation.setDuration(280)
         self._fade_animation.setStartValue(0.0)
         self._fade_animation.setEndValue(1.0)
         self._fade_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.setWindowOpacity(1.0)
         container_layout = QVBoxLayout(self.container)
         container_layout.setAlignment(Qt.AlignCenter)
         container_layout.setSpacing(12)
@@ -491,10 +498,13 @@ class OverlayWindow(QWidget):
         """Affiche pseudo/avatar/média avec un fondu entrant, sans fondu sortant."""
         if self._fade_animation is not None:
             self._fade_animation.stop()
-        self._opacity_effect.setOpacity(0.0)
+        self.setWindowOpacity(0.0)
         self.container.show()
         self.container.raise_()
+        self.raise_()
         if self._fade_animation is not None:
+            self._fade_animation.setStartValue(0.0)
+            self._fade_animation.setEndValue(1.0)
             self._fade_animation.start()
 
     def show_notice(self, text, ms=4000):
@@ -614,6 +624,13 @@ class OverlayWindow(QWidget):
                     self.request_quit("le serveur dit que le live chat est inactif")
                     return
 
+                # Le serveur renvoie position/mode jeu même lorsqu'aucun nouveau
+                # média n'est disponible. On les applique donc indépendamment de l'URL.
+                self.settings_ready.emit({
+                    "position": data.get("position", "center"),
+                    "game_mode": bool(data.get("game_mode", False)),
+                })
+
                 new_url = data.get("url")
                 if not new_url:
                     self.last_done_url = None
@@ -681,29 +698,60 @@ class OverlayWindow(QWidget):
                     last_err = msg
                 time.sleep(2)
 
+    def apply_live_settings(self, data, force=False):
+        """Applique position et mode jeu même si la vidéo actuelle n'a pas changé."""
+        position = data.get("position", "center")
+        if position not in ("left", "center", "right"):
+            position = "center"
+        is_game_mode = bool(data.get("game_mode", False))
+
+        if (not force and position == self.current_position
+                and is_game_mode == self.current_game_mode):
+            return
+
+        self.current_position = position
+        self.current_game_mode = is_game_mode
+        if is_game_mode:
+            self.current_max_size = 380
+            self.set_video_box(380, 215)
+            header_font = QFont("Segoe UI", 13, QFont.Bold)
+            self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
+            self.text_label.setMaximumWidth(380)
+            avatar_size = 26
+        else:
+            self.current_max_size = 850
+            self.set_video_box(850, 480)
+            header_font = QFont("Segoe UI", 20, QFont.Bold)
+            self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
+            self.text_label.setMaximumWidth(850)
+            avatar_size = 40
+
+        self.update_alignment(position)
+
+        if self.current_author:
+            avatar = None
+            if self.current_avatar_source is not None and not self.current_avatar_source.isNull():
+                avatar = create_discord_avatar_with_ring(self.current_avatar_source, size=avatar_size)
+            self.header.set_content(self.current_author, avatar, header_font)
+
+        if self._current_image_pixmap is not None and not self._current_image_pixmap.isNull():
+            pixmap = self._current_image_pixmap
+            if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
+                pixmap = pixmap.scaled(self.current_max_size, self.current_max_size,
+                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.image_label.setPixmap(pixmap)
+
     def handle_new_media(self, data):
         try:
             self.is_clearing = False
             self.media_player.stop()
-            position = data.get("position", "center")
-            is_game_mode = data.get("game_mode", False)
-
-            if is_game_mode:
-                self.current_max_size = 380
-                self.set_video_box(380, 215)
+            self.apply_live_settings(data, force=True)
+            if self.current_game_mode:
                 header_font = QFont("Segoe UI", 13, QFont.Bold)
-                self.text_label.setFont(QFont("Segoe UI", 15, QFont.Bold))
-                self.text_label.setMaximumWidth(380)
                 avatar_size = 26
             else:
-                self.current_max_size = 850
-                self.set_video_box(850, 480)
                 header_font = QFont("Segoe UI", 20, QFont.Bold)
-                self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
-                self.text_label.setMaximumWidth(850)
                 avatar_size = 40
-
-            self.update_alignment(position)
 
             url = data.get("url")
             if not url:
@@ -719,16 +767,22 @@ class OverlayWindow(QWidget):
             else:
                 self.text_label.hide()
 
-            avatar_pix = None
+            avatar_source = None
             avatar_bytes = data.get("avatar_bytes")
             if avatar_bytes:
                 img = QImage.fromData(avatar_bytes)
                 pix = QPixmap.fromImage(img)
                 if not pix.isNull():
-                    avatar_pix = create_discord_avatar_with_ring(pix, size=avatar_size)
-            self.header.set_content(str(author), avatar_pix, header_font)
+                    avatar_source = pix
+            self.current_author = str(author)
+            self.current_avatar_source = avatar_source
+            avatar_pix = None
+            if avatar_source is not None:
+                avatar_pix = create_discord_avatar_with_ring(avatar_source, size=avatar_size)
+            self.header.set_content(self.current_author, avatar_pix, header_font)
 
             content = data.get("content_bytes") or b""
+            self._current_image_pixmap = None
             path = urlparse(url).path.lower()
             ctype = data.get("content_type") or ""
             is_vid = is_video_media(url, ctype, content)
@@ -766,6 +820,7 @@ class OverlayWindow(QWidget):
                 if pixmap.width() > self.current_max_size or pixmap.height() > self.current_max_size:
                     pixmap = pixmap.scaled(self.current_max_size, self.current_max_size,
                                            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._current_image_pixmap = QPixmap.fromImage(image)
                 self.image_label.setPixmap(pixmap)
                 self.show_with_fade()
                 self.raise_()
@@ -836,19 +891,24 @@ class OverlayWindow(QWidget):
             self.video_path = None
 
     def hide_overlay_ui(self):
+        # Aucun fondu sortant : on masque immédiatement et on restaure l'opacité
+        # de la fenêtre avant le prochain média.
         if self._fade_animation is not None:
             self._fade_animation.stop()
-        if self._opacity_effect is not None:
-            self._opacity_effect.setOpacity(1.0)
+        self.setWindowOpacity(1.0)
         self.close_timer.stop()
         self.media_player.stop()
         self.image_label.clear()
+        self.video_label.clear()
         self.video_label.hide()
         self.image_label.hide()
         self.header.clear_content()
         self.text_label.clear()
         self.container.hide()
         self._cleanup_video_file()
+        self.current_author = ""
+        self.current_avatar_source = None
+        self._current_image_pixmap = None
         self.current_loaded_url = None
         self.is_clearing = False
 

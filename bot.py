@@ -17,7 +17,7 @@ global_queue = []
 current_active_item = None
 active_users = set()
 user_positions = {}
-user_game_modes = {}  # Nouveau : stockage du Mode Jeu (True / False) par utilisateur
+user_game_modes = {}  # Stockage du Mode Jeu (True / False) par utilisateur
 data_lock = threading.Lock()
 last_pop_time = 0
 
@@ -101,7 +101,6 @@ class PersonalControlView(discord.ui.View):
         self.update_button_styles()
 
     def update_button_styles(self):
-        # Bouton On / Off
         if self.is_active:
             self.toggle_btn.label = "Désactiver mon Live Chat"
             self.toggle_btn.style = discord.ButtonStyle.danger
@@ -111,7 +110,6 @@ class PersonalControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-        # Bouton Mode Jeu
         is_gm = user_game_modes.get(self.username, False)
         if is_gm:
             self.btn_game_mode.label = "Mode Jeu : ACTIF"
@@ -122,7 +120,6 @@ class PersonalControlView(discord.ui.View):
             self.btn_game_mode.style = discord.ButtonStyle.secondary
             self.btn_game_mode.emoji = "🎮"
 
-        # Boutons de position
         pos = user_positions.get(self.username, "center")
         self.btn_left.style = discord.ButtonStyle.primary if pos == "left" else discord.ButtonStyle.secondary
         self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
@@ -203,7 +200,11 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(label="Gérer mon Live Chat", emoji="⚙️", style=discord.ButtonStyle.blurple, custom_id="main_manage_btn_persistent_v77")
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        # Utilisation de thinking=True pour éviter l'expiration de l'interaction (Erreur 10062)
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception:
+            pass
             
         username = interaction.user.display_name
         with data_lock:

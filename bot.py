@@ -200,11 +200,21 @@ def resolve_api_user(value):
 
 
 def get_user_settings(user_id):
+    """Renvoie les préférences du compte et garantit une position latérale en Mode Jeu."""
     with data_lock:
+        game_mode = bool(user_game_modes.get(user_id, False))
+        position = user_positions.get(user_id, "center")
+        if position not in ("left", "center", "right"):
+            position = "center"
+        # Migration des anciennes préférences : le Mode Jeu ne doit jamais rester centré.
+        if game_mode and position == "center":
+            position = "right"
+            user_positions[user_id] = position
+            swift_save_data()
         return {
             "active": user_id in active_users,
-            "position": user_positions.get(user_id, "center"),
-            "game_mode": bool(user_game_modes.get(user_id, False)),
+            "position": position,
+            "game_mode": game_mode,
         }
 
 
@@ -248,10 +258,9 @@ def get_personal_panel_content(user_id):
     return (
         "⚙️ **Tes réglages Live Chat**\n"
         f"🟢 **Live Chat :** {active_text}\n"
-        f"📍 **Position :** {position_text}\n\n"
-        "Ces réglages sont privés et indépendants de ceux des autres utilisateurs."
-        # Caractère invisible après les lignes vides : Discord conserve le blanc
-        # visuel entre le texte de présentation et les boutons du panneau.
+        f"📍 **Position :** {position_text}"
+        # On garde volontairement une ligne vide avant les boutons, sans la phrase
+        # supplémentaire sur la confidentialité.
         "\n\n\u200b"
     )
 
@@ -343,9 +352,19 @@ class PersonalControlView(discord.ui.View):
         self.btn_game_mode.emoji = "🎮"
 
         position = settings["position"]
+        game_mode = settings["game_mode"]
+
         self.btn_left.style = discord.ButtonStyle.primary if position == "left" else discord.ButtonStyle.secondary
-        self.btn_center.style = discord.ButtonStyle.primary if position == "center" else discord.ButtonStyle.secondary
         self.btn_right.style = discord.ButtonStyle.primary if position == "right" else discord.ButtonStyle.secondary
+
+        # En Mode Jeu, le bouton Centre est retiré de la vue Discord (pas simplement désactivé).
+        # Quand le Mode Jeu est désactivé, le bouton est réinséré pour retrouver les 3 positions.
+        if game_mode:
+            if self.btn_center in self.children:
+                self.remove_item(self.btn_center)
+        elif self.btn_center not in self.children:
+            self.add_item(self.btn_center)
+        self.btn_center.style = discord.ButtonStyle.primary if position == "center" else discord.ButtonStyle.secondary
 
     async def _check_owner(self, interaction):
         if str(interaction.user.id) == self.user_id:
@@ -401,7 +420,13 @@ class PersonalControlView(discord.ui.View):
             return
         user_id = register_discord_user(interaction.user)
         with data_lock:
-            user_game_modes[user_id] = not bool(user_game_modes.get(user_id, False))
+            enable_game_mode = not bool(user_game_modes.get(user_id, False))
+            user_game_modes[user_id] = enable_game_mode
+            # Si l'utilisateur active le Mode Jeu depuis Centre, on le bascule à Droite.
+            # Le bouton Centre disparaît alors de la vue, et le serveur renverra une position valide.
+            position = user_positions.get(user_id, "center")
+            if enable_game_mode and position == "center":
+                user_positions[user_id] = "right"
             swift_save_data()
         await self._refresh_private_message(interaction)
 
@@ -433,7 +458,12 @@ class PersonalControlView(discord.ui.View):
             return
         user_id = register_discord_user(interaction.user)
         with data_lock:
-            user_positions[user_id] = "center"
+            # Protège aussi contre un ancien panneau dont le composant Centre
+            # serait encore cliquable après l'activation du Mode Jeu.
+            if user_game_modes.get(user_id, False):
+                user_positions[user_id] = "right"
+            else:
+                user_positions[user_id] = "center"
             swift_save_data()
         await self._refresh_private_message(interaction)
 
@@ -668,6 +698,12 @@ def get_next_meme():
         if position not in ("left", "center", "right"):
             position = "center"
         game_mode = bool(user_game_modes.get(user_id, False))
+        # Dernière barrière côté API : aucune réponse ne doit exposer Centre en Mode Jeu,
+        # même si les données viennent d'une ancienne version du stockage.
+        if game_mode and position == "center":
+            position = "right"
+            user_positions[user_id] = position
+            swift_save_data()
 
         if current_active_item:
             item_id = str(

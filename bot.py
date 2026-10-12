@@ -358,12 +358,26 @@ class PersonalControlView(discord.ui.View):
         self.btn_right.style = discord.ButtonStyle.primary if position == "right" else discord.ButtonStyle.secondary
 
         # En Mode Jeu, le bouton Centre est retiré de la vue Discord (pas simplement désactivé).
-        # Quand le Mode Jeu est désactivé, le bouton est réinséré pour retrouver les 3 positions.
+        # Quand le Mode Jeu est désactivé, on le réinsère puis on restaure explicitement
+        # l'ordre d'origine des composants : Gauche, Centre, Droite.
         if game_mode:
             if self.btn_center in self.children:
                 self.remove_item(self.btn_center)
         elif self.btn_center not in self.children:
             self.add_item(self.btn_center)
+
+        # discord.py ajoute un élément supprimé à la fin de la liste des composants.
+        # Sans ce tri, Centre apparaîtrait après Droite après avoir désactivé le Mode Jeu.
+        component_order = {
+            "personal_toggle_livechat": 0,
+            "personal_toggle_game_mode": 1,
+            "personal_position_left": 2,
+            "personal_position_center": 3,
+            "personal_position_right": 4,
+        }
+        self._children.sort(
+            key=lambda item: component_order.get(getattr(item, "custom_id", ""), 99)
+        )
         self.btn_center.style = discord.ButtonStyle.primary if position == "center" else discord.ButtonStyle.secondary
 
     async def _check_owner(self, interaction):

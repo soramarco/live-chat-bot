@@ -25,6 +25,11 @@ user_game_modes = {}             # discord_user_id -> bool
 user_aliases = {}                # discord_user_id -> anciens/nouveaux noms utilisés par core.pyw
 panel_message = None
 panel_channel_id = None
+# Garde une seule réponse privée de réglages par utilisateur pendant que le bot tourne.
+# Les messages éphémères ne sont pas accessibles via l'historique du salon, donc on
+# conserve la référence retournée par Discord pour pouvoir la supprimer au prochain clic.
+personal_panel_messages = {}  # discord_user_id -> message éphémère
+personal_panel_open_lock = asyncio.Lock()
 data_lock = threading.RLock()
 last_pop_time = 0
 
@@ -235,7 +240,6 @@ def get_channel_panel_content():
 def get_personal_panel_content(user_id):
     settings = get_user_settings(user_id)
     active_text = "Activé" if settings["active"] else "Désactivé"
-    game_text = "Activé" if settings["game_mode"] else "Désactivé"
     position_text = {
         "left": "Gauche",
         "center": "Centre",
@@ -244,9 +248,11 @@ def get_personal_panel_content(user_id):
     return (
         "⚙️ **Tes réglages Live Chat**\n"
         f"🟢 **Live Chat :** {active_text}\n"
-        f"🎮 **Mode Jeu :** {game_text}\n"
         f"📍 **Position :** {position_text}\n\n"
         "Ces réglages sont privés et indépendants de ceux des autres utilisateurs."
+        # Caractère invisible après les lignes vides : Discord conserve le blanc
+        # visuel entre le texte de présentation et les boutons du panneau.
+        "\n\n\u200b"
     )
 
 
@@ -266,11 +272,46 @@ class PublicControlView(discord.ui.View):
     async def open_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = register_discord_user(interaction.user)
         view = PersonalControlView(user_id)
-        await interaction.response.send_message(
-            content=get_personal_panel_content(user_id),
-            view=view,
-            ephemeral=True,
-        )
+
+        # Accuse réception sans publier un nouveau message dans le salon.
+        # Le panneau personnel est envoyé en follow-up privé ci-dessous.
+        await interaction.response.defer(thinking=False)
+
+        async with personal_panel_open_lock:
+            previous_message = personal_panel_messages.get(user_id)
+            if previous_message is not None:
+                try:
+                    # Supprime le précédent panneau éphémère avant d'en créer un autre.
+                    await previous_message.delete()
+                    personal_panel_messages.pop(user_id, None)
+                except Exception as delete_error:
+                    # Si Discord ne permet plus de supprimer ce message (ex. ancien
+                    # jeton d'interaction), on essaie de réutiliser le même message.
+                    try:
+                        await previous_message.edit(
+                            content=get_personal_panel_content(user_id),
+                            view=view,
+                        )
+                        personal_panel_messages[user_id] = previous_message
+                        return
+                    except Exception as edit_error:
+                        print(
+                            f"[PANEL] Ancien panneau privé non réutilisable pour {user_id}: "
+                            f"suppression={delete_error}; édition={edit_error}"
+                        )
+                    personal_panel_messages.pop(user_id, None)
+
+            try:
+                new_message = await interaction.followup.send(
+                    content=get_personal_panel_content(user_id),
+                    view=view,
+                    ephemeral=True,
+                    wait=True,
+                )
+                if new_message is not None:
+                    personal_panel_messages[user_id] = new_message
+            except Exception as error:
+                print(f"[PANEL] Impossible d'ouvrir les réglages privés pour {user_id}: {error}")
 
 
 class PersonalControlView(discord.ui.View):

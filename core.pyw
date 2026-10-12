@@ -48,13 +48,10 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-11-core-polish-v6")
+log("CORE_BUILD_ID=2026-10-12-core-vertically-centered-v6")
 
 try:
-    from PyQt5.QtCore import (
-        Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty,
-        QPropertyAnimation, QEasingCurve,
-    )
+    from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
     from PyQt5.QtGui import (
         QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
     )
@@ -75,16 +72,6 @@ OLD_LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.l
 BASE_URL = "https://live-chat-bot-ctus.onrender.com"
 SERVER_URL = BASE_URL + "/get_next_meme"
 POP_URL = BASE_URL + "/pop_meme"
-
-# --- Réglages d'économie de ressources (mettre False pour désactiver) ---------
-# Le process passe en priorité "sous la normale" : le jeu garde toujours la main.
-LOWER_PRIORITY = True
-# La grande fenêtre transparente plein écran n'est affichée que pendant un média.
-# Au repos elle est masquée : aucun impact sur l'affichage du jeu.
-HIDE_WINDOW_WHEN_IDLE = True
-
-MAX_MEDIA_BYTES = 150 * 1024 * 1024  # sécurité : on ignore les fichiers plus gros
-TEMP_DIR = os.path.join(tempfile.gettempdir(), "livechat_overlay")
 
 VIDEO_EXTS = (
     ".mp4", ".m4v", ".mov", ".webm", ".avi", ".mkv", ".wmv",
@@ -156,7 +143,6 @@ def infer_video_suffix(url, content_type, content):
 class UnsupportedMedia(Exception):
     pass
 
-
 # ---------------------------------------------------------------------------
 # UNE SEULE INSTANCE (mutex Windows : disparait tout seul si le process meurt)
 # ---------------------------------------------------------------------------
@@ -178,34 +164,6 @@ def acquire_single_instance():
     except Exception:
         log("Mutex impossible : " + traceback.format_exc())
         return True
-
-
-def lower_process_priority():
-    """Priorité 'sous la normale' : en jeu, le CPU va d'abord au jeu."""
-    if os.name != "nt" or not LOWER_PRIORITY:
-        return
-    try:
-        import ctypes
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.GetCurrentProcess.restype = ctypes.c_void_p
-        k32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        ok = k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL
-        log("Priorité du process : sous la normale" if ok else "Priorité du process inchangée")
-    except Exception:
-        log("Priorité impossible à modifier : " + traceback.format_exc())
-
-
-def prepare_temp_dir():
-    """Dossier temporaire dédié, vidé au démarrage (pas de vieilles vidéos qui s'accumulent)."""
-    try:
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        for name in os.listdir(TEMP_DIR):
-            try:
-                os.remove(os.path.join(TEMP_DIR, name))
-            except Exception:
-                pass
-    except Exception:
-        log("Dossier temporaire : " + traceback.format_exc())
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +240,7 @@ def create_discord_avatar_with_ring(pixmap, size=40):
 
 
 # ---------------------------------------------------------------------------
-# EN-TETE (avatar + pseudo) : flottement fluide, centré au-dessus de la vidéo
-# Le contour du texte est calculé une seule fois (pas à chaque image).
+# EN-TETE (avatar + pseudo) AVEC FLOTTEMENT FLUIDE ET CENTRAGE CORRIGÉ
 # ---------------------------------------------------------------------------
 class FloatingHeader(QWidget):
     PAD = 6
@@ -296,12 +253,6 @@ class FloatingHeader(QWidget):
         self._avatar = None
         self._text = ""
         self._font = QFont("Segoe UI", 20, QFont.Bold)
-        self._path = QPainterPath()
-        self._text_w = 0
-        self._fm_height = 0
-        self._fm_ascent = 0
-        self._outline_pen = QPen(QColor(0, 0, 0, 220), 3.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        self._fill_brush = QBrush(QColor(255, 255, 255))
         self._paint_opacity = 1.0
         self._t0 = time.monotonic()
         self._timer = QTimer(self)
@@ -320,100 +271,92 @@ class FloatingHeader(QWidget):
 
     paintOpacity = pyqtProperty(float, fget=getPaintOpacity, fset=setPaintOpacity)
 
-    def _has_content(self):
-        return bool(self._text or self._avatar)
-
-    def _rebuild(self):
-        fm = QFontMetrics(self._font)
-        self._fm_height = fm.height()
-        self._fm_ascent = fm.ascent()
-        self._path = QPainterPath()
-        if self._text:
-            self._path.addText(QPointF(0, 0), self._font, self._text)
-            try:
-                self._text_w = fm.horizontalAdvance(self._text)
-            except AttributeError:
-                self._text_w = fm.width(self._text)
-        else:
-            self._text_w = 0
-
-    def _sync_timer(self):
-        # L'animation ne tourne que si l'en-tête est visible ET rempli.
-        should_run = self.isVisible() and self._has_content()
-        if should_run and not self._timer.isActive():
-            self._timer.start()
-        elif not should_run and self._timer.isActive():
-            self._timer.stop()
-
     def set_content(self, text, avatar, font):
         self._text = text
         self._avatar = avatar
         self._font = font
-        self._rebuild()
+        # L'animation ne tourne que lorsque l'en-tête contient réellement du contenu.
+        if (self._text or self._avatar) and self.isVisible():
+            if not self._timer.isActive():
+                self._timer.start()
+        else:
+            self._timer.stop()
         self.updateGeometry()
         self.update()
-        self._sync_timer()
 
     def clear_content(self):
         self._text = ""
         self._avatar = None
-        self._rebuild()
+        self._timer.stop()
         self.updateGeometry()
         self.update()
-        self._sync_timer()
+
+    def _text_width(self, fm):
+        try:
+            return fm.horizontalAdvance(self._text)
+        except AttributeError:
+            return fm.width(self._text)
 
     def sizeHint(self):
-        if not self._has_content():
+        if not self._text and not self._avatar:
             return QSize(0, 0)
+        fm = QFontMetrics(self._font)
+        text_w = self._text_width(fm) if self._text else 0
         av_w = self._avatar.width() if self._avatar else 0
         av_h = self._avatar.height() if self._avatar else 0
         gap = self.GAP if (self._avatar and self._text) else 0
-        w = av_w + gap + self._text_w + 2 * self.PAD + 6
-        h = int(max(av_h, self._fm_height) + 2 * self.PAD + 2 * self.AMP)
+        w = av_w + gap + text_w + 2 * self.PAD + 6
+        h = int(max(av_h, fm.height()) + 2 * self.PAD + 2 * self.AMP)
         return QSize(w, h)
 
     def minimumSizeHint(self):
         return self.sizeHint()
 
     def showEvent(self, event):
+        if self._text or self._avatar:
+            self._timer.start()
         super().showEvent(event)
-        self._sync_timer()
 
     def hideEvent(self, event):
+        self._timer.stop()
         super().hideEvent(event)
-        self._sync_timer()
 
     def paintEvent(self, event):
-        if not self._has_content():
+        if not self._text and not self._avatar:
             return
         p = QPainter(self)
-        p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        p.setRenderHints(
+            QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
         p.setOpacity(self._paint_opacity)
         offset = math.sin((time.monotonic() - self._t0) * self.SPEED) * self.AMP
+        fm = QFontMetrics(self._font)
         cy = self.height() / 2.0 + offset
 
-        # Bloc complet (avatar + texte) centré au milieu du widget
+        # Correction : calcul précis pour centrer le bloc complet (avatar + texte) au milieu du widget
         av_w = self._avatar.width() if self._avatar else 0
+        text_w = self._text_width(fm) if self._text else 0
         gap = self.GAP if (self._avatar and self._text) else 0
-        x = (self.width() - (av_w + gap + self._text_w)) / 2.0
+        total_content_width = av_w + gap + text_w
+        
+        x = (self.width() - total_content_width) / 2.0
         if x < 0:
             x = self.PAD + 3.0
 
         if self._avatar:
             p.drawPixmap(QPointF(x, cy - self._avatar.height() / 2.0), self._avatar)
-            x += av_w + gap
+            x += self._avatar.width() + self.GAP
         if self._text:
-            baseline = cy - self._fm_height / 2.0 + self._fm_ascent
-            p.translate(x, baseline)
-            p.setPen(self._outline_pen)
+            baseline = cy - fm.height() / 2.0 + fm.ascent()
+            path = QPainterPath()
+            path.addText(QPointF(x, baseline), self._font, self._text)
+            p.setPen(QPen(QColor(0, 0, 0, 220), 3.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.setBrush(Qt.NoBrush)
-            p.drawPath(self._path)
-            p.fillPath(self._path, self._fill_brush)
+            p.drawPath(path)
+            p.fillPath(path, QBrush(QColor(255, 255, 255)))
         p.end()
 
-
 # ---------------------------------------------------------------------------
-# SURFACE D'AFFICHAGE PEINTE DIRECTEMENT (images fixes, mode jeu)
+# SURFACE D'AFFICHAGE PEINTE DIRECTEMENT (images et frames vidéo)
 # ---------------------------------------------------------------------------
 class FrameDisplayWidget(QWidget):
     """Affiche l'image courante par QPainter, sans cache pixmap de QLabel."""
@@ -464,8 +407,10 @@ class FrameDisplayWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        # Les widgets à boîte fixe effacent TOUTE la boîte à chaque dessin :
-        # aucun pixel d'une ancienne image ne reste derrière la nouvelle.
+        # Les widgets vidéo utilisent une boîte fixe (850x480 ou 380x215) :
+        # effacer TOUTE la boîte à chaque frame empêche les pixels d'une ancienne
+        # frame paysage de rester derrière une nouvelle frame portrait, et inversement.
+        # L'effacement et le dessin ont lieu dans le même paintEvent.
         if self._fixed_box or self._image.isNull() or self.width() <= 0 or self.height() <= 0:
             painter.setCompositionMode(QPainter.CompositionMode_Source)
             painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
@@ -480,13 +425,17 @@ class FrameDisplayWidget(QWidget):
         target = QRectF(x, y, target_size.width(), target_size.height())
 
         if self._paint_opacity >= 0.999:
-            # Régime normal : on remplace directement les pixels (pas de recomposition
-            # sur la fenêtre translucide, source d'images fantômes sous Windows).
+            # En régime normal, remplacer directement les pixels de l'image.
+            # Ne pas effacer toute la surface transparente puis recomposer
+            # chaque frame : cela peut provoquer des artefacts de composition
+            # sur les fenêtres Qt translucides sous Windows (image visible en
+            # capture mais absente/ fantôme sur l'écran).
             painter.setCompositionMode(QPainter.CompositionMode_Source)
             painter.setOpacity(1.0)
             painter.drawImage(target, self._image)
         else:
-            # Pendant le fondu uniquement : on repart d'une surface vide.
+            # Pendant le fondu uniquement, on doit repartir d'une surface vide
+            # pour éviter de mélanger plusieurs frames semi-transparentes.
             painter.setCompositionMode(QPainter.CompositionMode_Source)
             painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
@@ -496,10 +445,7 @@ class FrameDisplayWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# RECEPTION DES IMAGES VIDEO
-# Le redimensionnement se fait ici (thread du lecteur), pas dans l'interface.
-# Si l'interface n'a pas fini d'afficher l'image précédente, on saute celle-ci
-# avant tout calcul : pas de retard qui s'accumule sur un PC chargé.
+# AFFICHAGE VIDEO IMAGE PAR IMAGE
 # ---------------------------------------------------------------------------
 class FrameSurface(QAbstractVideoSurface):
     frame_ready = pyqtSignal(QImage)
@@ -509,11 +455,6 @@ class FrameSurface(QAbstractVideoSurface):
         self.target_size = (850, 480)
         self._img_fmt = QImage.Format_Invalid
         self._count = 0
-        self._busy = False
-        self._dropped = 0
-
-    def frame_consumed(self):
-        self._busy = False
 
     def supportedPixelFormats(self, handle_type=QAbstractVideoBuffer.NoHandle):
         if handle_type == QAbstractVideoBuffer.NoHandle:
@@ -534,40 +475,29 @@ class FrameSurface(QAbstractVideoSurface):
             return False
         self._img_fmt = img_fmt
         self._count = 0
-        self._busy = False
-        self._dropped = 0
         log(f"Surface vidéo démarrée : {fmt.frameSize().width()}x{fmt.frameSize().height()}")
         return super().start(fmt)
-
-    def stop(self):
-        if self._dropped:
-            log(f"Images ignorées (affichage trop lent pour ce PC) : {self._dropped}")
-            self._dropped = 0
-        super().stop()
 
     def present(self, frame):
         if not frame.isValid():
             return False
-        if self._busy:
-            self._dropped += 1
-            return True
         clone = QVideoFrame(frame)
         if not clone.map(QAbstractVideoBuffer.ReadOnly):
             return False
         try:
             ptr = clone.bits()
             ptr.setsize(clone.mappedBytes())
-            src = QImage(ptr, clone.width(), clone.height(), clone.bytesPerLine(), self._img_fmt)
+            img = QImage(ptr, clone.width(), clone.height(), clone.bytesPerLine(), self._img_fmt)
             if self.surfaceFormat().scanLineDirection() == QVideoSurfaceFormat.BottomToTop:
-                src = src.mirrored(False, True)
-            w, h = self.target_size
-            # Redimensionnement de qualité, à la taille d'affichage, une seule fois.
-            img = src.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            if img.cacheKey() == src.cacheKey():
-                # Même taille : on détache les pixels du buffer vidéo avant de le libérer.
+                img = img.mirrored(False, True)
+            # Détacher les pixels AVANT de libérer la frame. Si une conversion
+            # change le format, Qt crée déjà un nouveau buffer; ne pas le recopier.
+            # Si le format est déjà RGB32, une copie explicite reste nécessaire
+            # car l'image source pointe encore sur le buffer mappé de QVideoFrame.
+            if img.format() == QImage.Format_RGB32:
                 img = img.copy()
-            # Sans coût si le format est déjà RGB32 (cas habituel).
-            img = img.convertToFormat(QImage.Format_RGB32)
+            else:
+                img = img.convertToFormat(QImage.Format_RGB32)
         finally:
             clone.unmap()
         self._count += 1
@@ -575,10 +505,8 @@ class FrameSurface(QAbstractVideoSurface):
             px = img.pixel(img.width() // 2, img.height() // 2)
             log(f"Image vidéo n°{self._count} : {img.width()}x{img.height()}, "
                 f"format source {self._img_fmt}, pixel central {px & 0xFFFFFFFF:08X}")
-        self._busy = True
         self.frame_ready.emit(img)
         return True
-
 
 # ---------------------------------------------------------------------------
 # FENETRE VIDEO NATIVE OPAQUE
@@ -607,7 +535,7 @@ class OpaqueVideoWindow(QWidget):
             self.clear_frame()
             return
         # Les frames proviennent déjà de FrameSurface en RGB32 et sont détachées.
-        # QImage utilise le partage implicite : pas de copie mémoire à chaque frame.
+        # QImage utilise le partage implicite : évite une copie mémoire à chaque frame.
         self._frame = (frame if frame.format() == QImage.Format_RGB32
                        else frame.convertToFormat(QImage.Format_RGB32).copy())
         # Ne modifier la fenêtre que si sa géométrie change; ne pas la remonter
@@ -631,13 +559,12 @@ class OpaqueVideoWindow(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
-        if not self._frame.isNull() and self._frame.size() == self.size():
-            # L'image couvre déjà toute la fenêtre à la taille exacte :
-            # ni fond à repeindre, ni redimensionnement.
-            painter.drawImage(0, 0, self._frame)
-        else:
-            painter.fillRect(event.rect(), QColor(0, 0, 0, 255))
-            if not self._frame.isNull():
+        painter.fillRect(event.rect(), QColor(0, 0, 0, 255))
+        if not self._frame.isNull():
+            if self._frame.size() == self.size():
+                # La frame est déjà à la taille exacte de la fenêtre : pas de redimensionnement.
+                painter.drawImage(0, 0, self._frame)
+            else:
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 painter.drawImage(self.rect(), self._frame)
         painter.end()
@@ -661,7 +588,6 @@ class OverlayWindow(QWidget):
         self.last_done_url = None
         self.is_clearing = False
         self.current_max_size = 850
-        self._media_token = 0  # change à chaque média : annule les minuteries périmées
         self._video_frames_shown = 0
         self._video_frames_received = 0
         self._video_box_size = QSize(850, 480)
@@ -717,7 +643,12 @@ class OverlayWindow(QWidget):
         self.image_label = FrameDisplayWidget(self.container, fixed_box=False)
         container_layout.addWidget(self.image_label, 0, Qt.AlignCenter)
 
-        # Mode jeu : le QLabel natif (rendu compact qui fonctionnait déjà).
+        # La vidéo est dessinée dans une zone aux dimensions exactes de son ratio.
+        # En mode normal, cette zone possède un fond opaque : sur une fenêtre
+        # plein écran translucide Windows, un QLabel transparent peut composer
+        # ses pixels en semi-transparence (visible seulement au screenshot).
+        # En mode jeu, on conserve le rendu compact déjà fonctionnel.
+        # Mode jeu : conserver le QLabel natif qui fonctionnait déjà.
         self.video_label = QLabel(self.container)
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet("background: transparent; border: none;")
@@ -727,11 +658,14 @@ class OverlayWindow(QWidget):
         container_layout.addWidget(self.video_label, 0, Qt.AlignCenter)
         self.video_label.hide()
 
-        # Mode normal : ce widget n'est qu'un placeholder transparent dans la mise
-        # en page. Les pixels réels sont affichés par video_window, une fenêtre
-        # native opaque posée exactement au-dessus du placeholder.
+        # Mode normal : utiliser le même moteur de peinture que les images fixes.
+        # Les frames vidéo n'empruntent plus le chemin QLabel + pixmap dans la
+        # fenêtre translucide plein écran, source probable de l'image fantôme.
         self.video_canvas = FrameDisplayWidget(self.container, fixed_box=False)
         self.video_canvas.setFixedSize(850, 480)
+        # En mode normal, ce widget est seulement un placeholder transparent
+        # dans le layout. Les pixels réels sont affichés par video_window,
+        # une fenêtre native opaque au-dessus du bureau.
         container_layout.addWidget(self.video_canvas, 0, Qt.AlignCenter)
         self.video_canvas.hide()
         self.video_window = OpaqueVideoWindow()
@@ -766,20 +700,6 @@ class OverlayWindow(QWidget):
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
 
-    # ---- affichage / masquage de la fenêtre -------------------------------
-    def _show_overlay(self):
-        self.container.show()
-        if not self.isVisible():
-            self.show()
-        self.container.raise_()
-        self.raise_()
-
-    def _hide_overlay(self):
-        self.container.hide()
-        # Au repos, la fenêtre plein écran disparaît complètement (aucun impact sur le jeu).
-        if HIDE_WINDOW_WHEN_IDLE and self.isVisible():
-            self.hide()
-
     def show_with_fade(self):
         """Fondu local des widgets, sans animer l'opacité de la fenêtre Windows."""
         for animation in self._fade_animations:
@@ -787,7 +707,7 @@ class OverlayWindow(QWidget):
             animation.deleteLater()
         self._fade_animations = []
 
-        # L'opacité locale du rendu vidéo n'est pas animée : une animation
+        # L'opacité locale du QLabel vidéo n'est pas animée : une animation
         # d'opacité sur les frames dans une fenêtre translucide provoquait des
         # frames invisibles sous Windows. Le header et les images gardent leur fondu.
         targets = [self.header]
@@ -797,7 +717,9 @@ class OverlayWindow(QWidget):
         for widget in targets:
             widget.setPaintOpacity(0.0)
 
-        self._show_overlay()
+        self.container.show()
+        self.container.raise_()
+        self.raise_()
 
         for widget in targets:
             animation = QPropertyAnimation(widget, b"paintOpacity", self)
@@ -816,29 +738,36 @@ class OverlayWindow(QWidget):
         self.video_window.clear_frame()
         self.text_label.setText(text)
         self.text_label.show()
-        self._show_overlay()
+        self.container.show()
+        self.raise_()
         QTimer.singleShot(ms, self._end_notice)
 
     def _end_notice(self):
         if self.current_loaded_url is None:
             self.text_label.clear()
-            self._hide_overlay()
+            self.container.hide()
 
     def update_alignment(self, position):
+        """Garde gauche/centre/droite horizontalement et centre le groupe verticalement.
+
+        Le container avait une hauteur préférée et pouvait rester près du haut de
+        l'écran. L'alignement Qt.AlignVCenter le place au milieu de la zone écran,
+        comme sur la capture de référence, quel que soit le choix horizontal.
+        Les widgets vidéo natifs suivent ce container via mapToGlobal().
+        """
         while self.main_layout.count():
             self.main_layout.takeAt(0)
         if position == "left":
-            self.main_layout.addWidget(self.container)
+            self.main_layout.addWidget(self.container, 0, Qt.AlignVCenter)
             self.main_layout.addStretch(1)
         elif position == "right":
             self.main_layout.addStretch(1)
-            self.main_layout.addWidget(self.container)
+            self.main_layout.addWidget(self.container, 0, Qt.AlignVCenter)
         else:
             self.main_layout.addStretch(1)
-            self.main_layout.addWidget(self.container)
+            self.main_layout.addWidget(self.container, 0, Qt.AlignVCenter)
             self.main_layout.addStretch(1)
 
-    # ---- réseau (thread séparé) -------------------------------------------
     def init_network(self):
         t = threading.Thread(target=self.network_worker, daemon=True)
         t.start()
@@ -882,53 +811,6 @@ class OverlayWindow(QWidget):
             log(f"Conversion via proxy impossible : {e}")
         return None
 
-    def _download_video(self, response, url, ctype):
-        """Écrit la vidéo sur le disque au fil du téléchargement (thread réseau).
-
-        Pas de fichier entier en mémoire, et aucune écriture disque dans le thread
-        de l'interface : l'animation reste fluide même avec une grosse vidéo.
-        """
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        path = None
-        handle = None
-        total = 0
-        try:
-            for chunk in response.iter_content(262144):
-                if not chunk:
-                    continue
-                if handle is None:
-                    suffix = infer_video_suffix(url, ctype, chunk[:16])
-                    fd, path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR)
-                    handle = os.fdopen(fd, "wb")
-                total += len(chunk)
-                if total > MAX_MEDIA_BYTES:
-                    raise UnsupportedMedia("fichier trop gros")
-                handle.write(chunk)
-            if handle is None:
-                raise RuntimeError("vidéo vide")
-        except BaseException:
-            if handle is not None:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-            if path:
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-            raise
-        handle.close()
-        return path, total
-
-    def _write_video_bytes(self, content, url, ctype):
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        suffix = infer_video_suffix(url, ctype, content)
-        fd, path = tempfile.mkstemp(suffix=suffix, dir=TEMP_DIR)
-        with os.fdopen(fd, "wb") as f:
-            f.write(content)
-        return path
-
     def request_quit(self, reason):
         log("Fermeture demandée : " + reason)
         # L'arrêt passe par la boucle Qt pour permettre le nettoyage du fichier vidéo.
@@ -947,15 +829,11 @@ class OverlayWindow(QWidget):
         count_404 = 0
         fail_url = None
         fail_count = 0
-        err_streak = 0
         # Le launcher déjà distribué ne fait que démarrer ce cœur une fois.
         # Pour éviter un deuxième programme de surveillance, le cœur reste en
         # arrière-plan quand le Live Chat est inactif et ne masque que l'overlay.
         # Ainsi, une prochaine activation sera détectée sans modifier le launcher.
         server_was_inactive = False
-        # Après une minute sans rien, on interroge le serveur un peu moins souvent
-        # (moins de réveils du processeur et du réseau pendant les parties).
-        last_activity = time.monotonic()
 
         while True:
             try:
@@ -966,7 +844,6 @@ class OverlayWindow(QWidget):
                     if count_404 >= 3 and not server_was_inactive:
                         log("Serveur HTTP 404 répété : overlay masqué; le cœur reste en attente et réessaie")
                         server_was_inactive = True
-                        last_activity = time.monotonic()
                         with self._network_state_lock:
                             self._network_active_key = None
                             self._network_last_done_key = None
@@ -983,7 +860,6 @@ class OverlayWindow(QWidget):
                     time.sleep(2)
                     continue
                 last_err = None
-                err_streak = 0
 
                 data = res.json()
                 summary = json.dumps(data, ensure_ascii=False)[:300]
@@ -995,13 +871,11 @@ class OverlayWindow(QWidget):
                     if not server_was_inactive:
                         log("Live Chat désactivé : overlay et média masqués; le cœur reste en attente de la prochaine activation")
                         server_was_inactive = True
-                        last_activity = time.monotonic()
                         with self._network_state_lock:
                             self._network_active_key = None
                             self._network_last_done_key = None
                         self.hide_requested.emit()
-                    quiet = time.monotonic() - last_activity
-                    time.sleep(1.2 if quiet < 60 else 2.5)
+                    time.sleep(1.2)
                     continue
 
                 # Le processus reste vivant pendant l'état inactif. Dès que le
@@ -1022,11 +896,9 @@ class OverlayWindow(QWidget):
                         self._network_active_key = None
                         self._network_last_done_key = None
                     if had_active:
-                        last_activity = time.monotonic()
                         log("Le serveur n'a plus de média actif : arrêt local immédiat")
                         self.cancel_current_requested.emit()
-                    quiet = time.monotonic() - last_activity
-                    time.sleep(0.8 if quiet < 60 else 1.5)
+                    time.sleep(0.8)
                     continue
 
                 item_key = str(data.get("item_id") or new_url)
@@ -1045,51 +917,27 @@ class OverlayWindow(QWidget):
                     time.sleep(0.45)
                     continue
 
-                last_activity = time.monotonic()
-
                 if changed_item:
                     log(f"Média actif changé côté serveur ({active_key} -> {item_key}) : arrêt de l'ancien sans pop")
                     self.cancel_current_requested.emit()
 
                 try:
-                    media_res = session.get(new_url, timeout=(5, 20), stream=True)
-                    try:
-                        if media_res.status_code != 200:
-                            raise RuntimeError(f"téléchargement du média : HTTP {media_res.status_code}")
+                    media_res = session.get(new_url, timeout=20)
+                    if media_res.status_code != 200:
+                        raise RuntimeError(f"téléchargement du média : HTTP {media_res.status_code}")
 
-                        data["url"] = new_url
-                        data["item_id"] = item_key
-                        ctype = media_res.headers.get("Content-Type", "")
-                        data["content_type"] = ctype
+                    data["url"] = new_url
+                    data["item_id"] = item_key
+                    data["content_bytes"] = media_res.content
+                    data["content_type"] = media_res.headers.get("Content-Type", "")
+                    log(f"Média téléchargé ({len(media_res.content)} octets, {data['content_type']})")
 
-                        try:
-                            declared = int(media_res.headers.get("Content-Length") or 0)
-                        except ValueError:
-                            declared = 0
-                        if declared > MAX_MEDIA_BYTES:
-                            raise UnsupportedMedia(f"fichier trop gros ({declared // (1024 * 1024)} Mo)")
-
-                        if is_video_media(new_url, ctype, b""):
-                            # Vidéo reconnue par son type ou son extension : écriture directe sur disque.
-                            video_path, total = self._download_video(media_res, new_url, ctype)
-                            data["video_path"] = video_path
-                            log(f"Média téléchargé ({total} octets, {ctype})")
-                        else:
-                            content = media_res.content
-                            if len(content) > MAX_MEDIA_BYTES:
-                                raise UnsupportedMedia("fichier trop gros")
-                            log(f"Média téléchargé ({len(content)} octets, {ctype})")
-                            if is_video_media(new_url, ctype, content):
-                                # Vidéo reconnue seulement par sa signature.
-                                data["video_path"] = self._write_video_bytes(content, new_url, ctype)
-                            else:
-                                displayable = self._make_displayable_image(session, new_url, content)
-                                if displayable is None:
-                                    raise UnsupportedMedia(
-                                        "format d'image non supporté (" + ctype + ")")
-                                data["content_bytes"] = displayable
-                    finally:
-                        media_res.close()
+                    if not is_video_media(new_url, data["content_type"], media_res.content):
+                        displayable = self._make_displayable_image(session, new_url, media_res.content)
+                        if displayable is None:
+                            raise UnsupportedMedia(
+                                "format d'image non supporté (" + data["content_type"] + ")")
+                        data["content_bytes"] = displayable
 
                     avatar_url = data.get("avatar", "")
                     if avatar_url:
@@ -1127,9 +975,7 @@ class OverlayWindow(QWidget):
                 if msg != last_err:
                     log(msg)
                     last_err = msg
-                err_streak += 1
-                # Serveur injoignable (ex : Render qui se réveille) : on espace les essais.
-                time.sleep(min(2 * err_streak, 15))
+                time.sleep(2)
 
     def _post_pop_and_release(self, completed_key, session=None):
         """Passe l'élément terminé uniquement si c'est encore l'élément actif."""
@@ -1177,7 +1023,6 @@ class OverlayWindow(QWidget):
             if self._network_active_key == str(completed_key or ""):
                 self._network_active_key = None
 
-    # ---- rendu vidéo ------------------------------------------------------
     def _render_video_frame_for_mode(self, source_frame):
         """Mode jeu : chemin QLabel historique ; mode normal : fenêtre opaque native."""
         if source_frame is None or source_frame.isNull():
@@ -1189,14 +1034,11 @@ class OverlayWindow(QWidget):
             return
 
         box = self._video_box_size
-        # Les images arrivent déjà redimensionnées à la boîte par FrameSurface :
-        # on ne redimensionne ici que si l'image dépasse la boîte (changement de mode).
-        if frame.width() > box.width() or frame.height() > box.height():
-            target = frame.size().scaled(box, Qt.KeepAspectRatio)
-        else:
-            target = frame.size()
+        target = frame.size().scaled(box, Qt.KeepAspectRatio)
         if target.isEmpty():
             return
+        # Conserver le redimensionnement de haute qualité, mais éviter de le recalculer
+        # quand la frame est déjà à la bonne taille.
         display_frame = (frame if frame.size() == target else
                          frame.scaled(target, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
 
@@ -1308,10 +1150,6 @@ class OverlayWindow(QWidget):
     def handle_new_media(self, data):
         try:
             self.is_clearing = False
-            self._media_token += 1
-            token = self._media_token
-            self._video_frames_received = 0
-            self.video_surface.frame_consumed()
             # Cet état est propre au thread graphique ; le thread réseau n'y touche plus.
             self.current_loaded_url = data.get("url")
             self.current_loaded_item_key = str(data.get("item_id") or data.get("url") or "")
@@ -1353,10 +1191,13 @@ class OverlayWindow(QWidget):
                 avatar_pix = create_discord_avatar_with_ring(avatar_source, size=avatar_size)
             self.header.set_content(self.current_author, avatar_pix, header_font)
 
+            content = data.get("content_bytes") or b""
             self._current_image_pixmap = None
-            video_path = data.get("video_path")
+            path = urlparse(url).path.lower()
+            ctype = data.get("content_type") or ""
+            is_vid = is_video_media(url, ctype, content)
 
-            if video_path:
+            if is_vid:
                 # Vider l'image précédente avant d'afficher la vidéo afin d'éviter
                 # que le backing store transparent conserve une ancienne image.
                 self.image_label.clear()
@@ -1369,17 +1210,21 @@ class OverlayWindow(QWidget):
                 self._video_frames_shown = 0
                 self._cleanup_video_file()
 
-                # Le fichier a déjà été écrit par le thread réseau.
-                self.video_path = video_path
+                suffix = infer_video_suffix(url, ctype, content)
+                self._video_frames_shown = 0
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                tmp.write(content)
+                tmp.flush()
+                tmp.close()
+                self.video_path = tmp.name
                 log(f"Lecture vidéo : {self.video_path}")
 
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_path)))
                 self.show_with_fade()
+                self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
-                QTimer.singleShot(5000, lambda t=token: self._check_frames(t))
                 self.close_timer.start(300000)
             else:
-                content = data.get("content_bytes") or b""
                 self.video_label.clear()
                 self.video_label.hide()
                 self.video_canvas.clear()
@@ -1399,6 +1244,7 @@ class OverlayWindow(QWidget):
                 self._current_image_pixmap = QPixmap.fromImage(image)
                 self.image_label.setPixmap(pixmap)
                 self.show_with_fade()
+                self.raise_()
                 self.close_timer.start(7000)
         except Exception:
             log("Erreur dans handle_new_media :\n" + traceback.format_exc())
@@ -1415,11 +1261,11 @@ class OverlayWindow(QWidget):
             self.video_canvas.setFixedSize(int(w), int(h))
 
     def on_video_frame(self, img):
+        if self.current_loaded_url is None or img is None or img.isNull():
+            return
         try:
-            if self.current_loaded_url is None or img is None or img.isNull():
-                return
-            # FrameSurface émet déjà une QImage RGB32 détachée du buffer vidéo
-            # et à la bonne taille : on la partage sans la recopier.
+            # FrameSurface émet déjà une QImage RGB32 détachée du buffer vidéo.
+            # On partage cette image implicitement au lieu de la recopier deux fois.
             frame = (img if img.format() == QImage.Format_RGB32
                      else img.convertToFormat(QImage.Format_RGB32).copy())
             if frame.isNull():
@@ -1431,17 +1277,15 @@ class OverlayWindow(QWidget):
             self._render_video_frame_for_mode(frame)
             self._video_frames_shown += 1
             if self._video_frames_shown == 1:
+                target = frame.size().scaled(self._video_box_size, Qt.KeepAspectRatio)
                 alpha = (frame.pixel(frame.width() // 2, frame.height() // 2) >> 24) & 0xff
                 renderer = "QLabel" if self.current_game_mode else "OpaqueVideoWindow"
                 box_size = self._video_box_size
-                log(f"CORE_RENDER_TEST : première frame={frame.width()}x{frame.height()}, "
-                    f"boîte={box_size.width()}x{box_size.height()}, "
+                log(f"CORE_RENDER_TEST : première frame source={frame.width()}x{frame.height()}, "
+                    f"cible={target.width()}x{target.height()}, boîte={box_size.width()}x{box_size.height()}, "
                     f"mode_jeu={self.current_game_mode}, alpha={alpha}, renderer={renderer}")
         except Exception:
             log("Erreur d'affichage d'une frame vidéo :\n" + traceback.format_exc())
-        finally:
-            # Libère la surface : la prochaine image vidéo peut maintenant arriver.
-            self.video_surface.frame_consumed()
 
     def paintEvent(self, event):
         # Le top-level est une fenêtre transparente plein écran. Effacer sa zone
@@ -1452,41 +1296,17 @@ class OverlayWindow(QWidget):
         painter.fillRect(event.rect(), QColor(0, 0, 0, 0))
         painter.end()
 
-    # ---- état du lecteur --------------------------------------------------
-    def _finish_if_token(self, token):
-        # N'agit que si on est toujours sur le même média (évite de couper le suivant).
-        if token == self._media_token:
-            self.finish_media_playback()
-
-    def _check_frames(self, token):
-        if (token == self._media_token and self.current_loaded_url is not None
-                and self.video_path and self._video_frames_received == 0):
-            log("Aucune image vidéo reçue après 5 s : codec probablement non supporté "
-                "sur ce PC (HEVC, AV1, VP9...). Le son continue.")
-            self.text_label.setText("⚠ Image de la vidéo non lisible sur ce PC (codec)")
-            self.text_label.show()
-
     def on_media_status(self, status):
-        if status == QMediaPlayer.LoadedMedia:
-            info = {}
-            for key in ("VideoCodec", "AudioCodec", "Resolution", "VideoFrameRate"):
-                try:
-                    val = self.media_player.metaData(key)
-                    if val not in (None, ""):
-                        info[key] = str(val)
-                except Exception:
-                    pass
-            log("Infos média : " + json.dumps(info, ensure_ascii=False))
-        elif status == QMediaPlayer.EndOfMedia:
+        if status == QMediaPlayer.EndOfMedia:
             log("Fin de la vidéo")
             self.finish_media_playback()
         elif status == QMediaPlayer.InvalidMedia:
             log("Vidéo invalide : codec manquant sur ce PC ?")
-            QTimer.singleShot(1500, lambda t=self._media_token: self._finish_if_token(t))
+            QTimer.singleShot(1500, self.finish_media_playback)
 
     def on_media_error(self, err):
         log(f"Erreur du lecteur vidéo : {err} - {self.media_player.errorString()}")
-        QTimer.singleShot(1500, lambda t=self._media_token: self._finish_if_token(t))
+        QTimer.singleShot(1500, self.finish_media_playback)
 
     def cancel_current_media(self):
         """Arrête le média local parce que le serveur l'a déjà retiré/remplacé.
@@ -1496,7 +1316,7 @@ class OverlayWindow(QWidget):
         """
         if self.current_loaded_url is None and self.video_path is None:
             self.video_window.clear_frame()
-            self._hide_overlay()
+            self.container.hide()
             return
         log("Arrêt local du média remplacé/retiré côté serveur")
         self.is_clearing = True
@@ -1513,7 +1333,6 @@ class OverlayWindow(QWidget):
             return
         self.is_clearing = True
         self.close_timer.stop()
-        log(f"Média terminé ({self._video_frames_received} images vidéo reçues)")
         completed_url = self.current_loaded_url
         completed_key = self.current_loaded_item_key or completed_url
         self.last_done_url = completed_url
@@ -1534,7 +1353,7 @@ class OverlayWindow(QWidget):
         if self.video_path:
             try:
                 self.media_player.stop()
-                self.media_player.setMedia(QMediaContent())  # libère le fichier sous Windows
+                self.media_player.setMedia(QMediaContent()) 
                 if os.path.exists(self.video_path):
                     os.remove(self.video_path)
             except Exception:
@@ -1550,6 +1369,8 @@ class OverlayWindow(QWidget):
         self._fade_animations = []
         self.header.setPaintOpacity(1.0)
         self.image_label.setPaintOpacity(1.0)
+        # Le canvas vidéo personnalisé n'a pas de fondu sortant; on restaure
+        # seulement l'opacité locale des widgets animés.
         self.close_timer.stop()
         self.media_player.stop()
         self._last_video_source_frame = QImage()
@@ -1562,7 +1383,7 @@ class OverlayWindow(QWidget):
         self.image_label.hide()
         self.header.clear_content()
         self.text_label.clear()
-        self._hide_overlay()
+        self.container.hide()
         self._cleanup_video_file()
         self.current_author = ""
         self.current_avatar_source = None
@@ -1576,6 +1397,7 @@ class OverlayWindow(QWidget):
         self._cleanup_video_file()
 
 
+
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -1584,9 +1406,6 @@ def main():
         log("Une autre instance tourne déjà")
         QMessageBox.warning(None, "Live Chat déjà actif", "Le live chat est déjà actif sur le PC !")
         return 0
-
-    lower_process_priority()
-    prepare_temp_dir()
 
     try:
         if os.path.exists(OLD_LOCK_FILE):
@@ -1603,8 +1422,7 @@ def main():
     log(f"Pseudo : {setup.pseudo}")
     overlay = OverlayWindow(setup.pseudo)
     overlay.quit_requested.connect(app.quit)
-    # La fenêtre s'affiche d'elle-même avec le message de démarrage ci-dessous,
-    # puis se masque quand il n'y a rien à montrer.
+    overlay.show()
     overlay.show_notice("Overlay connecté ✅", 4000)
 
     code = app.exec_()

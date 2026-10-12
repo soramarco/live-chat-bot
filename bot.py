@@ -3,6 +3,7 @@ import asyncio
 import threading
 import json
 import time
+import tempfile
 from threading import Thread
 
 import discord
@@ -11,79 +12,206 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-STORAGE_FILE = "bot_storage.json"
+STORAGE_FILE = os.environ.get("BOT_STORAGE_FILE", "bot_storage.json")
 TARGET_CHANNEL_ID = 1544497366814560318  # Salon Discord Live Chat
 
+# La file de médias est commune à tous les clients Live Chat.
+# Les préférences (activation, position, Mode Jeu) sont, elles, propres à chaque ID Discord.
 global_queue = []
 current_active_item = None
-active_users = set()
-user_positions = {}
-user_game_modes = {}
-last_panel_user = None
+active_users = set()             # ID Discord sous forme de chaîne (anciens noms migrés à la première interaction)
+user_positions = {}              # discord_user_id -> left / center / right
+user_game_modes = {}             # discord_user_id -> bool
+user_aliases = {}                # discord_user_id -> anciens/nouveaux noms utilisés par core.pyw
 panel_message = None
 panel_channel_id = None
 data_lock = threading.RLock()
 last_pop_time = 0
 
 
+def _normalise_alias(value):
+    return str(value or "").strip().casefold()
+
+
+def _unique_names(values):
+    result = []
+    seen = set()
+    for value in values:
+        value = str(value or "").strip()
+        key = _normalise_alias(value)
+        if value and key and key not in seen:
+            result.append(value)
+            seen.add(key)
+    return result
+
+
 def load_data():
-    global user_positions, active_users, user_game_modes, last_panel_user
+    """Charge aussi l'ancien format. Les anciens noms seront migrés vers l'ID Discord
+    dès que leur propriétaire ouvre le panneau privé de réglages.
+    """
+    global user_positions, active_users, user_game_modes, user_aliases
     if not os.path.exists(STORAGE_FILE):
         return
     try:
-        with open(STORAGE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        user_positions = data.get("user_positions", {})
-        active_users = set(data.get("active_users", []))
-        user_game_modes = data.get("user_game_modes", {})
-        last_panel_user = data.get("last_panel_user")
-        # Migration pour l'ancien fichier de stockage : si un seul utilisateur
-        # est actif, on peut sans ambiguïté afficher ses vrais réglages.
-        if not last_panel_user and len(active_users) == 1:
-            last_panel_user = next(iter(active_users))
+        with open(STORAGE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        user_positions = data.get("user_positions", {}) or {}
+        active_users = set(str(value) for value in data.get("active_users", []))
+        user_game_modes = data.get("user_game_modes", {}) or {}
+        user_aliases = {
+            str(user_id): _unique_names(aliases if isinstance(aliases, list) else [aliases])
+            for user_id, aliases in (data.get("user_aliases", {}) or {}).items()
+        }
         print(
-            f"[DATA] Données chargées : {len(user_positions)} utilisateur(s), "
-            f"{len(active_users)} actif(s)."
+            f"[DATA] Données chargées : {len(user_positions)} position(s), "
+            f"{len(active_users)} actif(s), {len(user_aliases)} identité(s) Discord connue(s)."
         )
-    except Exception as e:
-        print(f"[ERREUR] Chargement stockage : {e}")
+    except Exception as error:
+        print(f"[ERREUR] Chargement stockage : {error}")
 
 
 def swift_save_data():
+    """Sauvegarde atomique et sérialisée pour éviter les écritures concurrentes."""
     try:
-        data = {
-            "user_positions": user_positions,
-            "active_users": sorted(active_users),
-            "user_game_modes": user_game_modes,
-            "last_panel_user": last_panel_user,
-        }
-        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"[ERREUR] Sauvegarde stockage : {e}")
+        # Garder le verrou durant toute l'écriture empêche une sauvegarde ancienne
+        # de finir après une sauvegarde plus récente.
+        with data_lock:
+            data = {
+                "user_positions": user_positions,
+                "active_users": sorted(active_users),
+                "user_game_modes": user_game_modes,
+                "user_aliases": user_aliases,
+            }
+            destination = os.path.abspath(STORAGE_FILE)
+            directory = os.path.dirname(destination) or "."
+            os.makedirs(directory, exist_ok=True)
+            fd, temporary_path = tempfile.mkstemp(prefix="bot_storage_", suffix=".tmp", dir=directory)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as file:
+                    json.dump(data, file, ensure_ascii=False, indent=2)
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(temporary_path, destination)
+            finally:
+                if os.path.exists(temporary_path):
+                    try:
+                        os.remove(temporary_path)
+                    except OSError:
+                        pass
+    except Exception as error:
+        print(f"[ERREUR] Sauvegarde stockage : {error}")
 
 
 load_data()
 
 
-def get_panel_username(preferred=None):
-    """Un message Discord est partagé : il ne peut montrer qu'un profil à la fois.
+def register_discord_user(user):
+    """Enregistre l'ID Discord et les noms de compatibilité utilisés par core.pyw.
 
-    On conserve le profil de la dernière personne ayant utilisé les boutons.
-    Si l'ancien stockage ne le connaît pas et qu'un seul utilisateur est actif,
-    on utilise celui-ci pour éviter les boutons qui reviennent à leur état vierge.
+    Le stockage utilise l'ID Discord, pas display_name. Les noms restent des alias
+    pour que les versions actuelles de core.pyw (qui transmettent un pseudo texte)
+    puissent retrouver les bons réglages.
     """
-    global last_panel_user
+    user_id = str(user.id)
+    display_name = getattr(user, "display_name", None)
+    global_name = getattr(user, "global_name", None)
+    username = getattr(user, "name", None)
+    nickname = getattr(user, "nick", None)
+    new_aliases = _unique_names([display_name, global_name, username, nickname])
+
     with data_lock:
-        if preferred:
-            return preferred
-        if last_panel_user:
-            return last_panel_user
-        if len(active_users) == 1:
-            last_panel_user = next(iter(active_users))
-            swift_save_data()
-            return last_panel_user
+        old_aliases = user_aliases.get(user_id, [])
+        combined_aliases = _unique_names(new_aliases + old_aliases)
+        alias_norms = {_normalise_alias(alias) for alias in combined_aliases}
+        user_aliases[user_id] = combined_aliases
+
+        def alias_owned_by_another_user(alias_norm):
+            for other_id, aliases in user_aliases.items():
+                if other_id != user_id and any(_normalise_alias(a) == alias_norm for a in aliases):
+                    return True
+            return False
+
+        # Migration de l'ancien stockage indexé par display_name.
+        for mapping in (user_positions, user_game_modes):
+            for old_key in list(mapping.keys()):
+                old_key = str(old_key)
+                old_norm = _normalise_alias(old_key)
+                if old_key == user_id or old_norm not in alias_norms:
+                    continue
+                if alias_owned_by_another_user(old_norm):
+                    continue  # alias ambigu : ne jamais attribuer les données à la mauvaise personne
+                if user_id not in mapping:
+                    mapping[user_id] = mapping[old_key]
+                mapping.pop(old_key, None)
+
+        for old_key in list(active_users):
+            old_norm = _normalise_alias(old_key)
+            if old_key == user_id or old_norm not in alias_norms:
+                continue
+            if alias_owned_by_another_user(old_norm):
+                continue
+            active_users.discard(old_key)
+            active_users.add(user_id)
+
+        swift_save_data()
+    return user_id
+
+
+def resolve_api_user(value):
+    """Résout le pseudo transmis par core.pyw vers un ID Discord.
+
+    Si plusieurs comptes ont le même alias, ne choisit jamais arbitrairement un compte :
+    cela évite d'exposer les réglages d'un autre utilisateur.
+    """
+    value = str(value or "").strip()
+    if not value:
         return None
+
+    with data_lock:
+        # Prend en charge un futur core.pyw qui enverrait directement l'ID Discord.
+        if value in user_aliases or value in user_positions or value in user_game_modes:
+            return value
+
+        wanted = _normalise_alias(value)
+        matches = []
+        for user_id, aliases in user_aliases.items():
+            if any(_normalise_alias(alias) == wanted for alias in aliases):
+                matches.append(user_id)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            print(f"[SECURITE] Alias ambigu reçu de core.pyw : {value!r}; aucun profil choisi.")
+            return None
+
+        # Compatibilité avec les profils sauvegardés par l'ancienne version avant
+        # que leur propriétaire ait ouvert le nouveau panneau privé.
+        legacy_keys = set(str(key) for key in user_positions)
+        legacy_keys.update(str(key) for key in user_game_modes)
+        legacy_keys.update(str(key) for key in active_users)
+        legacy_matches = {key for key in legacy_keys if _normalise_alias(key) == wanted}
+        if len(legacy_matches) == 1:
+            return next(iter(legacy_matches))
+        return None
+
+
+def get_user_settings(user_id):
+    with data_lock:
+        return {
+            "active": user_id in active_users,
+            "position": user_positions.get(user_id, "center"),
+            "game_mode": bool(user_game_modes.get(user_id, False)),
+        }
+
+
+def _display_name_for_key(key):
+    key = str(key)
+    aliases = user_aliases.get(key, [])
+    if aliases:
+        return aliases[0]
+    # Ancien enregistrement de nom, avant la migration par ID.
+    if not key.isdigit():
+        return key
+    return "Utilisateur"
 
 
 @app.route("/")
@@ -92,34 +220,71 @@ def home():
 
 
 def get_channel_panel_content():
+    """Le panneau public n'affiche plus les réglages d'une personne en particulier."""
     with data_lock:
         count = len(active_users)
-        users_str = ", ".join(f"**{u}**" for u in sorted(active_users)) if count else "_Personne_"
-        displayed_user = get_panel_username()
-
-    text = (
+        users = sorted({_display_name_for_key(user_id) for user_id in active_users})
+    users_text = ", ".join(f"**{name}**" for name in users) if users else "_Personne_"
+    return (
         f"📊 **Statut en direct** : {count} actif(s)\n"
-        f"👤 **Connectés** : {users_str}\n"
+        f"👤 **Connectés** : {users_text}\n\n"
+        "👇 **Ouvre tes réglages personnels ci-dessous. Ils ne changent que pour ton compte.**"
     )
-    if displayed_user:
-        text += f"⚙️ **Réglages affichés pour** : {displayed_user}\n"
-    return text + "\n👇 **Gère ton Live Chat ci-dessous :**"
 
 
-class UnifiedControlView(discord.ui.View):
-    def __init__(self, username=None):
+def get_personal_panel_content(user_id):
+    settings = get_user_settings(user_id)
+    active_text = "Activé" if settings["active"] else "Désactivé"
+    game_text = "Activé" if settings["game_mode"] else "Désactivé"
+    position_text = {
+        "left": "Gauche",
+        "center": "Centre",
+        "right": "Droite",
+    }.get(settings["position"], "Centre")
+    return (
+        "⚙️ **Tes réglages Live Chat**\n"
+        f"🟢 **Live Chat :** {active_text}\n"
+        f"🎮 **Mode Jeu :** {game_text}\n"
+        f"📍 **Position :** {position_text}\n\n"
+        "Ces réglages sont privés et indépendants de ceux des autres utilisateurs."
+    )
+
+
+class PublicControlView(discord.ui.View):
+    """Vue commune neutre : son apparence ne dépend d'aucun utilisateur."""
+
+    def __init__(self):
         super().__init__(timeout=None)
-        self.username = get_panel_username(username)
+
+    @discord.ui.button(
+        label="Mes réglages Live Chat",
+        emoji="⚙️",
+        style=discord.ButtonStyle.primary,
+        row=0,
+        custom_id="open_my_personal_livechat_settings",
+    )
+    async def open_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = register_discord_user(interaction.user)
+        view = PersonalControlView(user_id)
+        await interaction.response.send_message(
+            content=get_personal_panel_content(user_id),
+            view=view,
+            ephemeral=True,
+        )
+
+
+class PersonalControlView(discord.ui.View):
+    """Chaque interaction privée est liée à l'ID Discord de son propriétaire."""
+
+    def __init__(self, user_id):
+        # Les panneaux privés peuvent être rouverts avec le bouton public s'ils expirent.
+        super().__init__(timeout=900)
+        self.user_id = str(user_id)
         self.update_button_styles()
 
     def update_button_styles(self):
-        uname = self.username
-        with data_lock:
-            is_active = bool(uname and uname in active_users)
-            is_gm = bool(uname and user_game_modes.get(uname, False))
-            pos = user_positions.get(uname, "center") if uname else "center"
-
-        if is_active:
+        settings = get_user_settings(self.user_id)
+        if settings["active"]:
             self.toggle_btn.label = "Désactiver mon Live Chat"
             self.toggle_btn.style = discord.ButtonStyle.danger
             self.toggle_btn.emoji = "🔴"
@@ -128,7 +293,7 @@ class UnifiedControlView(discord.ui.View):
             self.toggle_btn.style = discord.ButtonStyle.success
             self.toggle_btn.emoji = "🟢"
 
-        if is_gm:
+        if settings["game_mode"]:
             self.btn_game_mode.label = "Mode Jeu : ACTIF"
             self.btn_game_mode.style = discord.ButtonStyle.success
         else:
@@ -136,97 +301,116 @@ class UnifiedControlView(discord.ui.View):
             self.btn_game_mode.style = discord.ButtonStyle.secondary
         self.btn_game_mode.emoji = "🎮"
 
-        self.btn_left.style = discord.ButtonStyle.primary if pos == "left" else discord.ButtonStyle.secondary
-        self.btn_center.style = discord.ButtonStyle.primary if pos == "center" else discord.ButtonStyle.secondary
-        self.btn_right.style = discord.ButtonStyle.primary if pos == "right" else discord.ButtonStyle.secondary
+        position = settings["position"]
+        self.btn_left.style = discord.ButtonStyle.primary if position == "left" else discord.ButtonStyle.secondary
+        self.btn_center.style = discord.ButtonStyle.primary if position == "center" else discord.ButtonStyle.secondary
+        self.btn_right.style = discord.ButtonStyle.primary if position == "right" else discord.ButtonStyle.secondary
 
-    def remember_user(self, username):
-        global last_panel_user
-        self.username = username
-        last_panel_user = username
+    async def _check_owner(self, interaction):
+        if str(interaction.user.id) == self.user_id:
+            return True
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "Ces réglages ne sont accessibles qu'à la personne qui les a ouverts.",
+                ephemeral=True,
+            )
+        return False
+
+    async def _refresh_private_message(self, interaction, refresh_public=False):
+        self.update_button_styles()
+        await interaction.response.edit_message(
+            content=get_personal_panel_content(self.user_id),
+            view=self,
+        )
+        if refresh_public:
+            await refresh_public_panel()
 
     @discord.ui.button(
-        label="Chargement...", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="unified_toggle_btn"
+        label="Activer mon Live Chat",
+        emoji="🟢",
+        style=discord.ButtonStyle.success,
+        row=0,
+        custom_id="personal_toggle_livechat",
     )
     async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        uname = interaction.user.display_name
+        if not await self._check_owner(interaction):
+            return
+        # Utilise l'ID Discord, jamais display_name comme clé de stockage.
+        user_id = register_discord_user(interaction.user)
+        if user_id != self.user_id:
+            await interaction.response.send_message("Profil invalide. Rouvre tes réglages.", ephemeral=True)
+            return
         with data_lock:
-            self.remember_user(uname)
-            if uname in active_users:
-                active_users.remove(uname)
+            if user_id in active_users:
+                active_users.remove(user_id)
             else:
-                active_users.add(uname)
+                active_users.add(user_id)
             swift_save_data()
-        self.update_button_styles()
-        await self.update_message(interaction)
+        await self._refresh_private_message(interaction, refresh_public=True)
 
     @discord.ui.button(
-        label="Mode Jeu", emoji="🎮", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="unified_game_mode_btn"
+        label="Mode Jeu : INACTIF",
+        emoji="🎮",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+        custom_id="personal_toggle_game_mode",
     )
     async def btn_game_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        uname = interaction.user.display_name
+        if not await self._check_owner(interaction):
+            return
+        user_id = register_discord_user(interaction.user)
         with data_lock:
-            self.remember_user(uname)
-            user_game_modes[uname] = not user_game_modes.get(uname, False)
+            user_game_modes[user_id] = not bool(user_game_modes.get(user_id, False))
             swift_save_data()
-        self.update_button_styles()
-        await self.update_message(interaction)
+        await self._refresh_private_message(interaction)
 
     @discord.ui.button(
-        label="Gauche", emoji="⬅️", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="unified_left_btn"
+        label="Gauche",
+        emoji="⬅️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+        custom_id="personal_position_left",
     )
     async def btn_left(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        uname = interaction.user.display_name
+        if not await self._check_owner(interaction):
+            return
+        user_id = register_discord_user(interaction.user)
         with data_lock:
-            self.remember_user(uname)
-            user_positions[uname] = "left"
+            user_positions[user_id] = "left"
             swift_save_data()
-        self.update_button_styles()
-        await self.update_message(interaction)
+        await self._refresh_private_message(interaction)
 
     @discord.ui.button(
-        label="Centre", emoji="⏺️", style=discord.ButtonStyle.primary,
-        row=1, custom_id="unified_center_btn"
+        label="Centre",
+        emoji="⏺️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+        custom_id="personal_position_center",
     )
     async def btn_center(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        uname = interaction.user.display_name
+        if not await self._check_owner(interaction):
+            return
+        user_id = register_discord_user(interaction.user)
         with data_lock:
-            self.remember_user(uname)
-            user_positions[uname] = "center"
+            user_positions[user_id] = "center"
             swift_save_data()
-        self.update_button_styles()
-        await self.update_message(interaction)
+        await self._refresh_private_message(interaction)
 
     @discord.ui.button(
-        label="Droite", emoji="➡️", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="unified_right_btn"
+        label="Droite",
+        emoji="➡️",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+        custom_id="personal_position_right",
     )
     async def btn_right(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        uname = interaction.user.display_name
+        if not await self._check_owner(interaction):
+            return
+        user_id = register_discord_user(interaction.user)
         with data_lock:
-            self.remember_user(uname)
-            user_positions[uname] = "right"
+            user_positions[user_id] = "right"
             swift_save_data()
-        self.update_button_styles()
-        await self.update_message(interaction)
-
-    async def update_message(self, interaction):
-        try:
-            content = get_channel_panel_content()
-            await interaction.message.edit(content=content, view=self)
-            global panel_message, panel_channel_id
-            panel_message = interaction.message
-            panel_channel_id = interaction.message.channel.id
-        except Exception as e:
-            print(f"Erreur mise à jour message unifié : {e}")
+        await self._refresh_private_message(interaction)
 
 
 intents = discord.Intents.default()
@@ -241,35 +425,34 @@ def is_target_channel(channel):
 panel_update_lock = asyncio.Lock()
 
 
-async def repost_bottom_panel(channel, move_to_bottom=False):
-    """Maintient un panneau unique. Sur un message utilisateur, le recrée en bas.
+async def refresh_public_panel():
+    channel = bot.get_channel(TARGET_CHANNEL_ID)
+    if channel is not None:
+        await repost_bottom_panel(channel)
 
-    Discord ne permet pas de déplacer un message existant : pour qu'il reste le
-    dernier message du salon, il faut en envoyer un nouveau puis supprimer l'ancien.
-    Les états des boutons sont recalculés depuis le stockage avant chaque envoi.
-    """
+
+async def repost_bottom_panel(channel, move_to_bottom=False):
+    """Maintient un panneau public unique et neutre en bas du salon."""
     global panel_message, panel_channel_id
     async with panel_update_lock:
         try:
-            chosen_user = get_panel_username()
             content = get_channel_panel_content()
-            view = UnifiedControlView(chosen_user)
+            view = PublicControlView()
 
             if move_to_bottom:
-                # Récupère l'ancien panneau et les éventuels doublons (notamment
-                # après un redémarrage où la référence Python a été perdue).
                 old_panels = []
                 if panel_message is not None and panel_channel_id == channel.id:
                     old_panels.append(panel_message)
 
                 async for old_msg in channel.history(limit=50):
-                    if (old_msg.author == bot.user
-                            and "Statut en direct" in (old_msg.content or "")
-                            and all(old_msg.id != item.id for item in old_panels)):
+                    if (
+                        old_msg.author == bot.user
+                        and "Statut en direct" in (old_msg.content or "")
+                        and all(old_msg.id != item.id for item in old_panels)
+                    ):
                         old_panels.append(old_msg)
 
-                # Envoi d'abord le nouveau panneau : si l'envoi échoue, l'ancien
-                # reste utilisable. Les données persistées gardent l'état choisi.
+                # Envoie d'abord le nouveau panneau pour préserver l'ancien en cas d'échec.
                 new_panel = await channel.send(content=content, view=view)
                 panel_message = new_panel
                 panel_channel_id = channel.id
@@ -278,13 +461,10 @@ async def repost_bottom_panel(channel, move_to_bottom=False):
                         continue
                     try:
                         await old_msg.delete()
-                    except Exception as e:
-                        print(f"Impossible de supprimer l'ancien panneau {old_msg.id} : {e}")
+                    except Exception as error:
+                        print(f"Impossible de supprimer l'ancien panneau {old_msg.id} : {error}")
                 return
 
-            # À la connexion ou après un clic, on édite le panneau existant sans
-            # le déplacer inutilement ; le prochain message utilisateur le remettra
-            # ensuite en bas du salon.
             if panel_message is not None and panel_channel_id == channel.id:
                 try:
                     await panel_message.edit(content=content, view=view)
@@ -298,7 +478,7 @@ async def repost_bottom_panel(channel, move_to_bottom=False):
                 if old_msg.author == bot.user and "Statut en direct" in (old_msg.content or ""):
                     existing.append(old_msg)
 
-            existing.sort(key=lambda msg: msg.created_at, reverse=True)
+            existing.sort(key=lambda message: message.created_at, reverse=True)
             if existing:
                 panel_message = existing[0]
                 panel_channel_id = channel.id
@@ -311,14 +491,17 @@ async def repost_bottom_panel(channel, move_to_bottom=False):
             else:
                 panel_message = await channel.send(content=content, view=view)
                 panel_channel_id = channel.id
-        except Exception as e:
-            print(f"Erreur mise à jour panneau bas : {e}")
+        except Exception as error:
+            print(f"Erreur mise à jour panneau bas : {error}")
 
 
 @bot.event
 async def on_ready():
     print(f"[DISCORD] Connexion réussie en tant que bot ({bot.user})")
-    bot.add_view(UnifiedControlView())
+    # Le panneau public reste disponible après un redémarrage du processus.
+    if not getattr(bot, "_public_view_registered", False):
+        bot.add_view(PublicControlView())
+        bot._public_view_registered = True
     channel = bot.get_channel(TARGET_CHANNEL_ID)
     if channel:
         await repost_bottom_panel(channel)
@@ -329,10 +512,9 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     global current_active_item, global_queue
-    # Ignore nos propres panneaux/contrôles pour éviter une boucle de repost.
     if bot.user is not None and message.author.id == bot.user.id:
         return
-    # Si un autre bot publie dans le salon, remettre aussi notre panneau sous son message.
+
     if message.author.bot:
         if is_target_channel(message.channel):
             await repost_bottom_panel(message.channel, move_to_bottom=True)
@@ -367,15 +549,9 @@ async def on_message(message):
                 else:
                     global_queue.append(item)
                     is_first = False
-            # Le message de contrôle du média est envoyé avant le panneau : le
-            # panneau pourra ainsi finir tout en bas, après tous les messages du bot.
             await send_control_message(item, is_active=is_first)
 
-
     await bot.process_commands(message)
-
-    # Replacer le panneau tout à la fin APRÈS le traitement du message et les
-    # éventuelles réponses de commande, sans perdre l'état sauvegardé des boutons.
     if is_target_channel(message.channel):
         await repost_bottom_panel(message.channel, move_to_bottom=True)
 
@@ -391,9 +567,6 @@ class ItemStopView(discord.ui.View):
         await interaction.response.defer()
         global current_active_item, global_queue, last_pop_time
         with data_lock:
-            # Le Stop manuel ne doit pas être ignoré parce qu'un média précédent
-            # vient de finir. Le /pop_meme tardif de cet ancien média est protégé
-            # par item_id dans l'endpoint et ne pourra pas supprimer le suivant.
             if current_active_item != self.item_ref:
                 return
             last_pop_time = time.time()
@@ -418,10 +591,10 @@ async def send_control_message(item, is_active):
             "🎬 **Média en cours de diffusion...**"
             if is_active else "⏳ **En attente dans la file...**"
         )
-        msg = await item["message_obj"].reply(status_text, view=view)
-        item["control_message"] = msg
-    except Exception as e:
-        print(f"Erreur critique en envoyant le message de contrôle : {e}")
+        message = await item["message_obj"].reply(status_text, view=view)
+        item["control_message"] = message
+    except Exception as error:
+        print(f"Erreur critique en envoyant le message de contrôle : {error}")
 
 
 async def activate_next_item_message(item):
@@ -431,25 +604,37 @@ async def activate_next_item_message(item):
             await item["control_message"].edit(
                 content="🎬 **Média en cours de diffusion...**", view=view
             )
-    except Exception as e:
-        print(f"Erreur activation prochain message : {e}")
+    except Exception as error:
+        print(f"Erreur activation prochain média : {error}")
 
 
 @app.route("/get_next_meme", methods=["GET"])
 def get_next_meme():
     global current_active_item
-    user = request.args.get("user", "").strip()
-    if not user:
-        return jsonify({"url": None, "status": "inactive"})
+    requested_name = request.args.get("user", "").strip()
+    user_id = resolve_api_user(requested_name)
 
     with data_lock:
-        if user not in active_users:
-            return jsonify({"url": None, "status": "inactive"})
-        position = user_positions.get(user, "center")
-        game_mode = user_game_modes.get(user, False)
+        if user_id is None or user_id not in active_users:
+            return jsonify({
+                "url": None,
+                "position": "center",
+                "game_mode": False,
+                "status": "inactive",
+            })
+
+        position = user_positions.get(user_id, "center")
+        if position not in ("left", "center", "right"):
+            position = "center"
+        game_mode = bool(user_game_modes.get(user_id, False))
+
         if current_active_item:
+            item_id = str(
+                current_active_item.get("item_id")
+                or getattr(current_active_item.get("message_obj"), "id", current_active_item["url"])
+            )
             res_data = {
-                "item_id": str(current_active_item.get("item_id") or getattr(current_active_item.get("message_obj"), "id", current_active_item["url"])),
+                "item_id": item_id,
                 "name": current_active_item["name"],
                 "avatar": current_active_item["avatar"],
                 "content": current_active_item["content"],
@@ -471,12 +656,9 @@ def get_next_meme():
 @app.route("/pop_meme", methods=["POST"])
 def pop_meme():
     global current_active_item, global_queue, last_pop_time
-    user = request.args.get("user", "").strip()
     requested_item_id = request.args.get("item_id", "").strip()
     with data_lock:
-        # Le client peut terminer une vidéo pile au moment où le bouton Stop a
-        # déjà remplacé l'élément actif. Un pop tardif doit alors être ignoré,
-        # sinon il enlève aussi le suivant de la file.
+        # Ignore un pop tardif d'un média terminé/remplacé : il ne doit pas avancer la file.
         if requested_item_id:
             current_item_id = None
             if current_active_item:
@@ -510,9 +692,9 @@ def pop_meme():
     return jsonify({"status": "success", "next": name})
 
 
-async def safe_delete_msg(msg):
+async def safe_delete_msg(message):
     try:
-        await msg.delete()
+        await message.delete()
     except Exception:
         pass
 
@@ -520,12 +702,11 @@ async def safe_delete_msg(msg):
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     print(f"[FLASK] Démarrage du serveur web sur le port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 
 if __name__ == "__main__":
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
+    flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
     TOKEN = os.environ.get("DISCORD_TOKEN")

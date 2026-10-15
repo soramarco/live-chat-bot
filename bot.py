@@ -11,6 +11,7 @@ from discord.ext import commands
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+BOT_BUILD_ID = "2026-10-15-interaction-ack-v2"
 
 STORAGE_FILE = os.environ.get("BOT_STORAGE_FILE", "bot_storage.json")
 TARGET_CHANNEL_ID = 1544497366814560318  # Salon Discord Live Chat
@@ -279,48 +280,75 @@ class PublicControlView(discord.ui.View):
         custom_id="open_my_personal_livechat_settings",
     )
     async def open_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = register_discord_user(interaction.user)
-        view = PersonalControlView(user_id)
+        # Acquitte l'interaction en créant tout de suite une réponse éphémère "en cours".
+        # Toutes les opérations lentes (stockage disque, verrou, suppression/édition)
+        # se font après cet accusé de réception pour éviter le délai Discord de ~3 secondes.
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except Exception as error:
+            print(f"[INTERACTION] Impossible d'acquitter l'ouverture des réglages: {error}")
+            return
 
-        # Accuse réception sans publier un nouveau message dans le salon.
-        # Le panneau personnel est envoyé en follow-up privé ci-dessous.
-        await interaction.response.defer(thinking=False)
+        user_id = None
+        try:
+            user_id = register_discord_user(interaction.user)
+            view = PersonalControlView(user_id)
 
-        async with personal_panel_open_lock:
-            previous_message = personal_panel_messages.get(user_id)
-            if previous_message is not None:
-                try:
-                    # Supprime le précédent panneau éphémère avant d'en créer un autre.
-                    await previous_message.delete()
-                    personal_panel_messages.pop(user_id, None)
-                except Exception as delete_error:
-                    # Si Discord ne permet plus de supprimer ce message (ex. ancien
-                    # jeton d'interaction), on essaie de réutiliser le même message.
+            async with personal_panel_open_lock:
+                previous_message = personal_panel_messages.get(user_id)
+                if previous_message is not None:
                     try:
-                        await previous_message.edit(
-                            content=get_personal_panel_content(user_id),
-                            view=view,
-                        )
-                        personal_panel_messages[user_id] = previous_message
-                        return
-                    except Exception as edit_error:
-                        print(
-                            f"[PANEL] Ancien panneau privé non réutilisable pour {user_id}: "
-                            f"suppression={delete_error}; édition={edit_error}"
-                        )
-                    personal_panel_messages.pop(user_id, None)
+                        # Évite d'accumuler les panneaux privés pour le même utilisateur.
+                        await asyncio.wait_for(previous_message.delete(), timeout=4.0)
+                        personal_panel_messages.pop(user_id, None)
+                    except Exception as delete_error:
+                        # Si l'ancien message est encore éditable (jeton non expiré),
+                        # on le réutilise puis on supprime la réponse "en cours" actuelle.
+                        try:
+                            await asyncio.wait_for(
+                                previous_message.edit(
+                                    content=get_personal_panel_content(user_id),
+                                    view=view,
+                                ),
+                                timeout=4.0,
+                            )
+                            personal_panel_messages[user_id] = previous_message
+                            try:
+                                await interaction.delete_original_response()
+                            except Exception:
+                                # Même en cas d'échec de suppression, remplacer le chargement
+                                # par un message court évite de laisser le spinner indéfiniment.
+                                try:
+                                    await interaction.edit_original_response(
+                                        content="Tes réglages sont déjà ouverts dans le panneau précédent.",
+                                        view=None,
+                                    )
+                                except Exception:
+                                    pass
+                            return
+                        except Exception as edit_error:
+                            print(
+                                f"[PANEL] Ancien panneau privé non réutilisable pour {user_id}: "
+                                f"suppression={delete_error}; édition={edit_error}"
+                            )
+                        personal_panel_messages.pop(user_id, None)
 
-            try:
-                new_message = await interaction.followup.send(
+                # Modifie la réponse éphémère différée de CETTE interaction au lieu
+                # d'utiliser followup.send : il n'y a ainsi qu'un seul nouveau panneau.
+                await interaction.edit_original_response(
                     content=get_personal_panel_content(user_id),
                     view=view,
-                    ephemeral=True,
-                    wait=True,
                 )
-                if new_message is not None:
-                    personal_panel_messages[user_id] = new_message
-            except Exception as error:
-                print(f"[PANEL] Impossible d'ouvrir les réglages privés pour {user_id}: {error}")
+                personal_panel_messages[user_id] = await interaction.original_response()
+        except Exception as error:
+            print(f"[INTERACTION] Échec ouverture réglages pour {user_id}: {type(error).__name__}: {error}")
+            try:
+                await interaction.edit_original_response(
+                    content="⚠️ Impossible d'ouvrir tes réglages pour le moment. Réessaie dans quelques secondes.",
+                    view=None,
+                )
+            except Exception as response_error:
+                print(f"[INTERACTION] Impossible d'afficher l'erreur à l'utilisateur: {response_error}")
 
 
 class PersonalControlView(discord.ui.View):
@@ -381,21 +409,41 @@ class PersonalControlView(discord.ui.View):
         self.btn_center.style = discord.ButtonStyle.primary if position == "center" else discord.ButtonStyle.secondary
 
     async def _check_owner(self, interaction):
-        if str(interaction.user.id) == self.user_id:
-            return True
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "Ces réglages ne sont accessibles qu'à la personne qui les a ouverts.",
-                ephemeral=True,
-            )
-        return False
+        # Valide le propriétaire avant toute écriture, puis acquitte tout de suite
+        # l'interaction pour que la sauvegarde synchrone ne provoque pas de timeout.
+        if str(interaction.user.id) != self.user_id:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Ces réglages ne sont accessibles qu'à la personne qui les a ouverts.",
+                    ephemeral=True,
+                )
+            return False
+        try:
+            await interaction.response.defer(thinking=False)
+        except Exception as error:
+            print(f"[INTERACTION] Impossible d'acquitter un réglage de {self.user_id}: {error}")
+            return False
+        return True
 
     async def _refresh_private_message(self, interaction, refresh_public=False):
-        self.update_button_styles()
-        await interaction.response.edit_message(
-            content=get_personal_panel_content(self.user_id),
-            view=self,
-        )
+        try:
+            self.update_button_styles()
+            # Après defer(thinking=False), edit_original_response modifie le panneau
+            # éphémère d'origine sans demander un second accusé de réception.
+            await interaction.edit_original_response(
+                content=get_personal_panel_content(self.user_id),
+                view=self,
+            )
+        except Exception as error:
+            print(f"[INTERACTION] Échec rafraîchissement panneau {self.user_id}: {error}")
+            try:
+                await interaction.followup.send(
+                    "Les réglages ont été pris en compte, mais le panneau n'a pas pu être actualisé. Rouvre tes réglages.",
+                    ephemeral=True,
+                )
+            except Exception as followup_error:
+                print(f"[INTERACTION] Impossible d'envoyer le message de secours: {followup_error}")
+            return
         if refresh_public:
             await refresh_public_panel()
 
@@ -503,6 +551,20 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Journalise l'arrivée des interactions pour distinguer un vieux panneau
+    d'un callback qui commence puis échoue. Ne répond pas à l'interaction ici.
+    """
+    try:
+        if interaction.type == discord.InteractionType.component:
+            data = interaction.data or {}
+            custom_id = str(data.get("custom_id", "inconnu"))
+            print(f"[INTERACTION] Composant reçu : {custom_id}")
+    except Exception as error:
+        print(f"[INTERACTION] Journalisation impossible : {error}")
+
+
 def is_target_channel(channel):
     return channel.id == TARGET_CHANNEL_ID
 
@@ -582,7 +644,7 @@ async def repost_bottom_panel(channel, move_to_bottom=False):
 
 @bot.event
 async def on_ready():
-    print(f"[DISCORD] Connexion réussie en tant que bot ({bot.user})")
+    print(f"[DISCORD] Connexion réussie en tant que bot ({bot.user}) | BOT_BUILD_ID={BOT_BUILD_ID}")
     # Le panneau public reste disponible après un redémarrage du processus.
     if not getattr(bot, "_public_view_registered", False):
         bot.add_view(PublicControlView())
@@ -797,6 +859,7 @@ def run_flask():
 
 
 if __name__ == "__main__":
+    print(f"[BUILD] BOT_BUILD_ID={BOT_BUILD_ID}")
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 

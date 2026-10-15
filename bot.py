@@ -4,14 +4,23 @@ import threading
 import json
 import time
 import tempfile
+import sys
 from threading import Thread
 
 import discord
 from discord.ext import commands
 from flask import Flask, jsonify, request
 
+# Render captures stdout/stderr; line buffering makes startup and retry diagnostics
+# visible immediately instead of appearing delayed or out of order.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, OSError):
+    pass
+
 app = Flask(__name__)
-BOT_BUILD_ID = "2026-10-15-cloudflare-backoff-v2-repost-panel"
+BOT_BUILD_ID = "2026-10-15-cloudflare-backoff-v3-visible-retry"
 
 STORAGE_FILE = os.environ.get("BOT_STORAGE_FILE", "bot_storage.json")
 TARGET_CHANNEL_ID = 1544497366814560318  # Salon Discord Live Chat
@@ -889,17 +898,21 @@ def _retry_after_from_http_exception(error):
 
 
 async def run_discord_with_backoff(token):
-    """Garde le service web vivant et réessaie Discord sans boucle de crash."""
+    """Keep Flask alive and retry Discord login without closing the reusable client."""
     delay = 60.0
-    max_backoff = 900.0  # plafond exponentiel de 15 minutes, hors Retry-After supérieur
+    max_backoff = 900.0  # 15 minutes; an explicit Retry-After may be longer
 
     while True:
         wait_seconds = delay
+        print(
+            f"[DISCORD] Tentative de connexion maintenant; prochaine attente de secours : {int(delay)} s.",
+            flush=True,
+        )
         try:
-            print(f"[DISCORD] Tentative de connexion (prochaine attente de secours : {int(delay)} s)...")
             await bot.start(token, reconnect=True)
-            # Une sortie normale de start est rare : ne pas relancer immédiatement.
-            print("[DISCORD] La connexion Discord s'est terminée; nouvelle tentative programmée.")
+            # Normally start() remains active until shutdown. Do not restart immediately
+            # if it returns; keep the retry cadence controlled.
+            print("[DISCORD] bot.start() s'est terminé sans exception.", flush=True)
             wait_seconds = delay
         except asyncio.CancelledError:
             raise
@@ -907,63 +920,75 @@ async def run_discord_with_backoff(token):
             status = getattr(error, "status", None)
             retry_after = _retry_after_from_http_exception(error)
             if status == 429:
-                # Respecte Retry-After s'il est présent, sinon utilise le backoff local.
                 wait_seconds = max(delay, retry_after or 0.0)
                 print(
-                    f"[DISCORD] HTTP 429 pendant la connexion (possible limitation Discord/Cloudflare). "
-                    f"Nouvel essai dans {int(wait_seconds)} s. Détail: {_short_error_message(error)}"
+                    f"[DISCORD] HTTP 429 à la connexion (Discord/Cloudflare). "
+                    f"Nouvel essai dans {int(wait_seconds)} s. "
+                    f"Détail: {_short_error_message(error)}",
+                    flush=True,
                 )
             else:
                 wait_seconds = max(delay, 300.0 if status in (401, 403) else 0.0)
                 print(
-                    f"[DISCORD] Erreur HTTP pendant la connexion (status={status}). "
-                    f"Nouvel essai dans {int(wait_seconds)} s. Détail: {_short_error_message(error)}"
+                    f"[DISCORD] Erreur HTTP de connexion (status={status}). "
+                    f"Nouvel essai dans {int(wait_seconds)} s. "
+                    f"Détail: {_short_error_message(error)}",
+                    flush=True,
                 )
         except discord.LoginFailure as error:
-            # Ne jamais afficher le token; une erreur d'authentification nécessite de vérifier l'env var.
             wait_seconds = max(delay, 300.0)
             print(
-                f"[DISCORD] Échec d'authentification. Vérifie DISCORD_TOKEN dans Render. "
-                f"Nouvel essai dans {int(wait_seconds)} s. Détail: {_short_error_message(error)}"
+                f"[DISCORD] Échec d'authentification. Vérifie le nom et la présence de "
+                f"DISCORD_TOKEN dans Render (valeur secrète non affichée). "
+                f"Nouvel essai dans {int(wait_seconds)} s. Détail: {_short_error_message(error)}",
+                flush=True,
             )
         except (OSError, asyncio.TimeoutError) as error:
             wait_seconds = delay
             print(
-                f"[DISCORD] Erreur réseau/temporaire: {type(error).__name__}: {error}. "
-                f"Nouvel essai dans {int(wait_seconds)} s."
+                f"[DISCORD] Erreur réseau temporaire: {type(error).__name__}: {error}. "
+                f"Nouvel essai dans {int(wait_seconds)} s.",
+                flush=True,
             )
         except Exception as error:
             wait_seconds = delay
             print(
-                f"[DISCORD] Erreur inattendue pendant le démarrage: {type(error).__name__}: {error}. "
-                f"Nouvel essai dans {int(wait_seconds)} s."
+                f"[DISCORD] Erreur inattendue: {type(error).__name__}: {_short_error_message(error)}. "
+                f"Nouvel essai dans {int(wait_seconds)} s.",
+                flush=True,
             )
-        finally:
-            # Après un échec de login, ferme proprement la session HTTP avant de réessayer.
-            try:
-                if not bot.is_closed():
-                    await bot.close()
-            except Exception as close_error:
-                print(f"[DISCORD] Erreur à la fermeture de session: {close_error}")
 
-        print(f"[DISCORD] Le serveur Flask reste actif; prochaine tentative dans {int(wait_seconds)} s.")
+        # Important: don't call bot.close() after a failed login. A closed discord.py
+        # Client cannot reliably be reused for the next attempt. An HTTP 429 response
+        # itself doesn't require destroying the Client; the next attempt reuses it.
+        print(
+            f"[DISCORD] Flask reste actif. Prochaine tentative dans {int(wait_seconds)} s.",
+            flush=True,
+        )
         await asyncio.sleep(wait_seconds)
         delay = min(max(delay * 2, 60.0), max_backoff)
 
 
 async def main():
-    print(f"[BUILD] BOT_BUILD_ID={BOT_BUILD_ID}")
-    flask_thread = Thread(target=run_flask, daemon=True)
+    print(f"[BUILD] BOT_BUILD_ID={BOT_BUILD_ID}", flush=True)
+    print("[STARTUP] main() démarré.", flush=True)
+    flask_thread = Thread(target=run_flask, daemon=True, name="flask-server")
     flask_thread.start()
+    print(f"[STARTUP] Thread Flask lancé (alive={flask_thread.is_alive()}).", flush=True)
 
-    # Laisse le serveur HTTP démarrer avant l'essai de connexion à Discord.
+    # Let HTTP health checks succeed before attempting Discord login.
     await asyncio.sleep(1.0)
-    token = os.environ.get("DISCORD_TOKEN")
+    token = os.environ.get("DISCORD_TOKEN", "").strip()
+    print(f"[STARTUP] Variable DISCORD_TOKEN présente: {'oui' if bool(token) else 'NON' }.", flush=True)
     if not token:
-        print("[ERREUR] DISCORD_TOKEN introuvable dans les variables d'environnement Render.")
-        # Le service HTTP reste disponible, mais le bot Discord ne peut pas fonctionner.
+        print(
+            "[ERREUR] DISCORD_TOKEN est absente ou vide dans Render > Environment. "
+            "L'API web reste active; Discord ne peut pas se connecter.",
+            flush=True,
+        )
         while True:
             await asyncio.sleep(3600)
+
     await run_discord_with_backoff(token)
 
 

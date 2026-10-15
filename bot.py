@@ -11,7 +11,7 @@ from discord.ext import commands
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
-BOT_BUILD_ID = "2026-10-15-cloudflare-backoff-v1"
+BOT_BUILD_ID = "2026-10-15-cloudflare-backoff-v2-repost-panel"
 
 STORAGE_FILE = os.environ.get("BOT_STORAGE_FILE", "bot_storage.json")
 TARGET_CHANNEL_ID = 1544497366814560318  # Salon Discord Live Chat
@@ -610,12 +610,12 @@ async def repost_bottom_panel(channel, move_to_bottom=False):
                         await old_msg.delete()
                     except Exception as error:
                         print(f"Impossible de supprimer l'ancien panneau {old_msg.id} : {error}")
-                return
+                return True
 
             if panel_message is not None and panel_channel_id == channel.id:
                 try:
                     await panel_message.edit(content=content, view=view)
-                    return
+                    return True
                 except Exception:
                     panel_message = None
                     panel_channel_id = None
@@ -638,20 +638,29 @@ async def repost_bottom_panel(channel, move_to_bottom=False):
             else:
                 panel_message = await channel.send(content=content, view=view)
                 panel_channel_id = channel.id
+            return True
         except Exception as error:
             print(f"Erreur mise à jour panneau bas : {error}")
+            return False
 
 
 @bot.event
 async def on_ready():
     print(f"[DISCORD] Connexion réussie en tant que bot ({bot.user}) | BOT_BUILD_ID={BOT_BUILD_ID}")
-    # Le panneau public reste disponible après un redémarrage du processus.
+    # La vue publique est enregistrée une seule fois par processus.
     if not getattr(bot, "_public_view_registered", False):
         bot.add_view(PublicControlView())
         bot._public_view_registered = True
+
     channel = bot.get_channel(TARGET_CHANNEL_ID)
     if channel:
-        await repost_bottom_panel(channel)
+        # Au premier on_ready après un démarrage du processus, créer un nouveau
+        # panneau en bas puis supprimer l'ancien. Lors d'une reconnexion réseau
+        # dans le même processus, simplement actualiser le panneau existant.
+        first_ready_this_process = not getattr(bot, "_public_panel_initialized", False)
+        ok = await repost_bottom_panel(channel, move_to_bottom=first_ready_this_process)
+        if ok and first_ready_this_process:
+            bot._public_panel_initialized = True
     else:
         print(f"[ERREUR] Salon cible {TARGET_CHANNEL_ID} introuvable dans le cache du bot.")
 

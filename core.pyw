@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-12-core-vertically-centered-v6")
+log("CORE_BUILD_ID=2026-10-16-shared-playback-audio-diagnostics-v7")
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
@@ -675,8 +675,13 @@ class OverlayWindow(QWidget):
 
         self.media_player = QMediaPlayer(None, QMediaPlayer.VideoSurface)
         self.media_player.setVideoOutput(self.video_surface)
+        # Le son est rendu par QMediaPlayer (indépendamment de la surface vidéo).
+        # On réinitialise explicitement le volume/mute pour éviter un état hérité.
+        self.media_player.setVolume(100)
+        self.media_player.setMuted(False)
         self.media_player.mediaStatusChanged.connect(self.on_media_status)
         self.media_player.error.connect(self.on_media_error)
+        self.media_player.audioAvailableChanged.connect(self.on_audio_available_changed)
 
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
@@ -914,7 +919,10 @@ class OverlayWindow(QWidget):
                         should_fetch = True
 
                 if not should_fetch:
-                    time.sleep(0.45)
+                    # 4 overlays qui interrogent toutes les 450 ms créent plusieurs
+                    # requêtes/seconde sans gain visible. 0,9 s reste réactif et réduit
+                    # la charge et le risque de 429/503 sur une petite instance Render.
+                    time.sleep(0.9)
                     continue
 
                 if changed_item:
@@ -952,7 +960,7 @@ class OverlayWindow(QWidget):
                     self.media_ready.emit(data)
                 except UnsupportedMedia as e:
                     log(f"Média ignoré : {e}")
-                    self._post_pop_and_release(item_key, session=session)
+                    self._post_pop_and_release(item_key, session=session, reason="failed")
                     fail_url, fail_count = None, 0
                 except Exception as e:
                     log(f"Échec média : {e}")
@@ -962,7 +970,7 @@ class OverlayWindow(QWidget):
                         fail_url, fail_count = new_url, 1
                     if fail_count >= 3:
                         log("Média abandonné après 3 échecs, on le passe")
-                        self._post_pop_and_release(item_key, session=session)
+                        self._post_pop_and_release(item_key, session=session, reason="failed")
                         fail_url, fail_count = None, 0
                     else:
                         with self._network_state_lock:
@@ -977,15 +985,19 @@ class OverlayWindow(QWidget):
                     last_err = msg
                 time.sleep(2)
 
-    def _post_pop_and_release(self, completed_key, session=None):
-        """Passe l'élément terminé uniquement si c'est encore l'élément actif."""
+    def _post_pop_and_release(self, completed_key, session=None, reason="finished"):
+        """Signale la fin (ou l'échec) du média courant au coordinateur de file."""
         client = session or requests
         last_error = None
         for attempt in range(4):
             try:
                 response = client.post(
                     POP_URL,
-                    params={"user": self.discord_pseudo, "item_id": str(completed_key or "")},
+                    params={
+                        "user": self.discord_pseudo,
+                        "item_id": str(completed_key or ""),
+                        "reason": reason,
+                    },
                     timeout=8,
                 )
                 try:
@@ -995,15 +1007,32 @@ class OverlayWindow(QWidget):
                 log(f"Réponse pop_meme : HTTP {response.status_code}, {result}")
 
                 status = result.get("status")
-                if response.status_code < 400 and status in ("success", "stale"):
-                    # stale signifie que Stop a déjà avancé le serveur. Surtout ne
-                    # jamais retenter un pop, car cela ferait sauter le suivant.
+                if response.status_code < 400 and status in ("success", "stale", "waiting"):
+                    # waiting = ce PC a fini, mais d'autres clients jouent encore le même média.
+                    # On le marque localement comme terminé afin de ne pas rejouer la vidéo
+                    # pendant que le serveur attend les autres.
                     if status == "stale":
-                        log("Pop ignoré : l'élément a déjà été remplacé côté serveur")
+                        log("Fin locale ignorée : le média a déjà été remplacé côté serveur")
+                    elif status == "waiting":
+                        log(
+                            f"[QUEUE] Lecture locale signalée ({reason}); "
+                            f"attente des autres clients ({result.get('finished', '?')}/"
+                            f"{result.get('required', '?')})."
+                        )
+                    elif status == "success":
+                        log("[QUEUE] Tous les clients attendus ont fini; le serveur passe au suivant.")
                     with self._network_state_lock:
                         self._network_last_done_key = str(completed_key or "")
                         if self._network_active_key == str(completed_key or ""):
                             self._network_active_key = None
+                    return
+
+                if status == "inactive":
+                    with self._network_state_lock:
+                        self._network_last_done_key = str(completed_key or "")
+                        if self._network_active_key == str(completed_key or ""):
+                            self._network_active_key = None
+                    log("[QUEUE] Profil inactif; aucun avancement global demandé.")
                     return
 
                 last_error = f"HTTP {response.status_code}, statut={status}"
@@ -1013,8 +1042,7 @@ class OverlayWindow(QWidget):
                 last_error = str(e)
                 log(f"Erreur pop_meme (tentative {attempt + 1}/4) : {e}")
 
-            # L'anti-double pop du serveur est de 1,5 s. Réessayer sans libérer
-            # l'identifiant de l'élément courant pendant l'attente.
+            # Le serveur déduplique les rapports par utilisateur et identifiant de média.
             if attempt < 3:
                 time.sleep(1.6)
 
@@ -1219,7 +1247,10 @@ class OverlayWindow(QWidget):
                 self.video_path = tmp.name
                 log(f"Lecture vidéo : {self.video_path}")
 
+                self.media_player.setMuted(False)
+                self.media_player.setVolume(100)
                 self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.video_path)))
+                log(f"Audio vidéo configuré : volume Qt={self.media_player.volume()}, muet Qt={self.media_player.isMuted()}")
                 self.show_with_fade()
                 self.raise_()
                 QTimer.singleShot(100, self.media_player.play)
@@ -1296,17 +1327,26 @@ class OverlayWindow(QWidget):
         painter.fillRect(event.rect(), QColor(0, 0, 0, 0))
         painter.end()
 
+    def on_audio_available_changed(self, available):
+        try:
+            log(
+                f"Piste audio vidéo disponible={bool(available)}, "
+                f"volume Qt={self.media_player.volume()}, muet Qt={self.media_player.isMuted()}"
+            )
+        except Exception as error:
+            log(f"Diagnostic audio indisponible : {error}")
+
     def on_media_status(self, status):
         if status == QMediaPlayer.EndOfMedia:
             log("Fin de la vidéo")
-            self.finish_media_playback()
+            self.finish_media_playback(reason="finished")
         elif status == QMediaPlayer.InvalidMedia:
             log("Vidéo invalide : codec manquant sur ce PC ?")
-            QTimer.singleShot(1500, self.finish_media_playback)
+            QTimer.singleShot(1500, lambda: self.finish_media_playback(reason="failed"))
 
     def on_media_error(self, err):
         log(f"Erreur du lecteur vidéo : {err} - {self.media_player.errorString()}")
-        QTimer.singleShot(1500, self.finish_media_playback)
+        QTimer.singleShot(1500, lambda: self.finish_media_playback(reason="failed"))
 
     def cancel_current_media(self):
         """Arrête le média local parce que le serveur l'a déjà retiré/remplacé.
@@ -1328,7 +1368,7 @@ class OverlayWindow(QWidget):
         self.hide_overlay_ui()
         self.is_clearing = False
 
-    def finish_media_playback(self):
+    def finish_media_playback(self, reason="finished"):
         if self.is_clearing or self.current_loaded_url is None:
             return
         self.is_clearing = True
@@ -1337,12 +1377,17 @@ class OverlayWindow(QWidget):
         completed_key = self.current_loaded_item_key or completed_url
         self.last_done_url = completed_url
         self.hide_overlay_ui()
-        # La file ne se débloque qu'en retirant cet item précis côté serveur.
-        threading.Thread(target=self._send_pop_request, args=(completed_key,), daemon=True).start()
+        # Chaque overlay signale son résultat; le serveur n'avance qu'une fois que
+        # tous les clients actifs récemment vus ont fini ou échoué à lire ce média.
+        threading.Thread(
+            target=self._send_pop_request,
+            args=(completed_key, reason),
+            daemon=True,
+        ).start()
 
-    def _send_pop_request(self, completed_key=None):
+    def _send_pop_request(self, completed_key=None, reason="finished"):
         try:
-            self._post_pop_and_release(completed_key or self.last_done_url)
+            self._post_pop_and_release(completed_key or self.last_done_url, reason=reason)
         except Exception as e:
             log(f"Erreur pop_meme : {e}")
             with self._network_state_lock:

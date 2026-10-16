@@ -20,7 +20,7 @@ except (AttributeError, OSError):
     pass
 
 app = Flask(__name__)
-BOT_BUILD_ID = "2026-10-16-shared-playback-quorum-v1"
+BOT_BUILD_ID = "2026-10-17-shared-playback-dedupe-v2"
 
 STORAGE_FILE = os.environ.get("BOT_STORAGE_FILE", "bot_storage.json")
 TARGET_CHANNEL_ID = 1544497366814560318  # Salon Discord Live Chat
@@ -718,17 +718,28 @@ async def on_message(message):
                 "control_message": None,
             }
             with data_lock:
-                if len(global_queue) > 15:
-                    global_queue.pop(0)
-                if current_active_item is None:
-                    current_active_item = item
-                    playback_finished_by.clear()
-                    playback_failed_by.clear()
-                    is_first = True
+                message_id = str(message.id)
+                active_id = str(current_active_item.get("item_id")) if current_active_item else None
+                queued_ids = {str(queued.get("item_id")) for queued in global_queue}
+                duplicate_item = message_id == active_id or message_id in queued_ids
+                if not duplicate_item:
+                    if len(global_queue) > 15:
+                        dropped = global_queue.pop(0)
+                        print(f"[QUEUE] File pleine, ancien item abandonné : {dropped.get('item_id')}", flush=True)
+                    if current_active_item is None:
+                        current_active_item = item
+                        playback_finished_by.clear()
+                        playback_failed_by.clear()
+                        is_first = True
+                    else:
+                        global_queue.append(item)
+                        is_first = False
                 else:
-                    global_queue.append(item)
                     is_first = False
-            await send_control_message(item, is_active=is_first)
+            if duplicate_item:
+                print(f"[QUEUE] Message {message_id} déjà présent, doublon ignoré.", flush=True)
+            else:
+                await send_control_message(item, is_active=is_first)
 
     await bot.process_commands(message)
     if is_target_channel(message.channel):

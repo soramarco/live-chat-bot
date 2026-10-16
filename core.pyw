@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-16-shared-playback-audio-diagnostics-v7")
+log("CORE_BUILD_ID=2026-10-17-video-repeat-guard-watchdog-v8")
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
@@ -586,6 +586,7 @@ class OverlayWindow(QWidget):
         self.video_path = None
         self.current_loaded_url = None
         self.last_done_url = None
+        self._last_terminal_item_key = None
         self.is_clearing = False
         self.current_max_size = 850
         self._video_frames_shown = 0
@@ -851,7 +852,8 @@ class OverlayWindow(QWidget):
                         server_was_inactive = True
                         with self._network_state_lock:
                             self._network_active_key = None
-                            self._network_last_done_key = None
+                            # Conserver le dernier item terminé : une réponse inactive
+                            # temporaire ne doit pas autoriser son redémarrage ensuite.
                         self.hide_requested.emit()
                     time.sleep(1.5)
                     continue
@@ -878,7 +880,7 @@ class OverlayWindow(QWidget):
                         server_was_inactive = True
                         with self._network_state_lock:
                             self._network_active_key = None
-                            self._network_last_done_key = None
+                            # Garder _network_last_done_key à travers l'état inactif.
                         self.hide_requested.emit()
                     time.sleep(1.2)
                     continue
@@ -899,7 +901,8 @@ class OverlayWindow(QWidget):
                     with self._network_state_lock:
                         had_active = self._network_active_key is not None
                         self._network_active_key = None
-                        self._network_last_done_key = None
+                        # Ne pas oublier le média terminé quand la file est vide :
+                        # un retour réseau périmé du même item doit rester ignoré.
                     if had_active:
                         log("Le serveur n'a plus de média actif : arrêt local immédiat")
                         self.cancel_current_requested.emit()
@@ -1177,10 +1180,20 @@ class OverlayWindow(QWidget):
 
     def handle_new_media(self, data):
         try:
+            incoming_url = data.get("url")
+            incoming_key = str(data.get("item_id") or incoming_url or "")
+            if incoming_key and incoming_key == self._last_terminal_item_key:
+                log(f"Média dupliqué ignoré après sa fin/annulation : {incoming_key}")
+                return
+            if (incoming_key and incoming_key == self.current_loaded_item_key
+                    and self.current_loaded_url is not None):
+                log(f"Événement de chargement dupliqué ignoré pour le média actif : {incoming_key}")
+                return
+
             self.is_clearing = False
             # Cet état est propre au thread graphique ; le thread réseau n'y touche plus.
-            self.current_loaded_url = data.get("url")
-            self.current_loaded_item_key = str(data.get("item_id") or data.get("url") or "")
+            self.current_loaded_url = incoming_url
+            self.current_loaded_item_key = incoming_key
             self._last_video_source_frame = QImage()
             self.media_player.stop()
             self.apply_live_settings(data, force=True)
@@ -1236,6 +1249,7 @@ class OverlayWindow(QWidget):
                 self.video_canvas.hide()
                 self.video_window.clear_frame()
                 self._video_frames_shown = 0
+                self._video_frames_received = 0
                 self._cleanup_video_file()
 
                 suffix = infer_video_suffix(url, ctype, content)
@@ -1253,7 +1267,11 @@ class OverlayWindow(QWidget):
                 log(f"Audio vidéo configuré : volume Qt={self.media_player.volume()}, muet Qt={self.media_player.isMuted()}")
                 self.show_with_fade()
                 self.raise_()
+                video_item_key = self.current_loaded_item_key
                 QTimer.singleShot(100, self.media_player.play)
+                # Certains PC peuvent ne produire ni erreur Qt ni frame vidéo
+                # (codec/backend différent). Ne pas bloquer le quorum indéfiniment.
+                QTimer.singleShot(12000, lambda key=video_item_key: self.check_video_start(key))
                 self.close_timer.start(300000)
             else:
                 self.video_label.clear()
@@ -1279,7 +1297,7 @@ class OverlayWindow(QWidget):
                 self.close_timer.start(7000)
         except Exception:
             log("Erreur dans handle_new_media :\n" + traceback.format_exc())
-            self.finish_media_playback()
+            self.finish_media_playback(reason="failed")
 
     def set_video_box(self, w, h):
         """Définit la boîte de rendu fixe; l'image garde son ratio à l'intérieur."""
@@ -1336,17 +1354,35 @@ class OverlayWindow(QWidget):
         except Exception as error:
             log(f"Diagnostic audio indisponible : {error}")
 
+    def check_video_start(self, item_key):
+        """Évite qu'un client sans décodage vidéo bloque indéfiniment la file partagée."""
+        if (not item_key or self.current_loaded_item_key != item_key
+                or self.current_loaded_url is None or self.is_clearing):
+            return
+        if self._video_frames_received == 0:
+            log(f"Aucune frame vidéo décodée après 12 s pour {item_key}; média signalé en échec")
+            self.finish_media_playback(reason="failed")
+
+    def _finish_failed_if_current(self, item_key, source):
+        # Les signaux Qt peuvent arriver en retard après un changement de média.
+        if (item_key and self.current_loaded_item_key == item_key
+                and self.current_loaded_url is not None):
+            log(f"Échec confirmé pour le média {item_key} ({source})")
+            self.finish_media_playback(reason="failed")
+
     def on_media_status(self, status):
         if status == QMediaPlayer.EndOfMedia:
             log("Fin de la vidéo")
             self.finish_media_playback(reason="finished")
         elif status == QMediaPlayer.InvalidMedia:
+            item_key = self.current_loaded_item_key
             log("Vidéo invalide : codec manquant sur ce PC ?")
-            QTimer.singleShot(1500, lambda: self.finish_media_playback(reason="failed"))
+            QTimer.singleShot(1500, lambda key=item_key: self._finish_failed_if_current(key, "InvalidMedia"))
 
     def on_media_error(self, err):
+        item_key = self.current_loaded_item_key
         log(f"Erreur du lecteur vidéo : {err} - {self.media_player.errorString()}")
-        QTimer.singleShot(1500, lambda: self.finish_media_playback(reason="failed"))
+        QTimer.singleShot(1500, lambda key=item_key: self._finish_failed_if_current(key, "media_error"))
 
     def cancel_current_media(self):
         """Arrête le média local parce que le serveur l'a déjà retiré/remplacé.
@@ -1359,6 +1395,7 @@ class OverlayWindow(QWidget):
             self.container.hide()
             return
         log("Arrêt local du média remplacé/retiré côté serveur")
+        self._last_terminal_item_key = str(self.current_loaded_item_key or self.current_loaded_url or "")
         self.is_clearing = True
         self.close_timer.stop()
         try:
@@ -1376,6 +1413,7 @@ class OverlayWindow(QWidget):
         completed_url = self.current_loaded_url
         completed_key = self.current_loaded_item_key or completed_url
         self.last_done_url = completed_url
+        self._last_terminal_item_key = str(completed_key or "")
         self.hide_overlay_ui()
         # Chaque overlay signale son résultat; le serveur n'avance qu'une fois que
         # tous les clients actifs récemment vus ont fini ou échoué à lire ce média.

@@ -20,7 +20,7 @@ except (AttributeError, OSError):
     pass
 
 app = Flask(__name__)
-BOT_BUILD_ID = "2026-10-15-cloudflare-backoff-v3-visible-retry"
+BOT_BUILD_ID = "2026-10-16-shared-playback-quorum-v1"
 
 STORAGE_FILE = os.environ.get("BOT_STORAGE_FILE", "bot_storage.json")
 TARGET_CHANNEL_ID = 1544497366814560318  # Salon Discord Live Chat
@@ -42,6 +42,14 @@ personal_panel_messages = {}  # discord_user_id -> message éphémère
 personal_panel_open_lock = asyncio.Lock()
 data_lock = threading.RLock()
 last_pop_time = 0
+
+# Les overlays partagent le même média, mais la fin de lecture doit être
+# confirmée par tous les clients actifs récemment vus : un PC qui termine ou
+# échoue plus vite ne doit plus couper la vidéo chez les autres.
+CLIENT_HEARTBEAT_TTL = 35.0
+client_last_seen = {}        # discord_user_id -> time.monotonic() du dernier GET
+playback_finished_by = set() # utilisateurs ayant fini normalement le média courant
+playback_failed_by = set()   # utilisateurs qui n'ont pas pu lire le média courant
 
 
 def _normalise_alias(value):
@@ -476,6 +484,10 @@ class PersonalControlView(discord.ui.View):
                 active_users.remove(user_id)
             else:
                 active_users.add(user_id)
+            # Une bascule active/inactive invalide un ancien accusé de fin : si
+            # l'utilisateur revient pendant le média courant, il doit être attendu.
+            playback_finished_by.discard(user_id)
+            playback_failed_by.discard(user_id)
             swift_save_data()
         await self._refresh_private_message(interaction, refresh_public=True)
 
@@ -710,6 +722,8 @@ async def on_message(message):
                     global_queue.pop(0)
                 if current_active_item is None:
                     current_active_item = item
+                    playback_finished_by.clear()
+                    playback_failed_by.clear()
                     is_first = True
                 else:
                     global_queue.append(item)
@@ -735,6 +749,8 @@ class ItemStopView(discord.ui.View):
             if current_active_item != self.item_ref:
                 return
             last_pop_time = time.time()
+            playback_finished_by.clear()
+            playback_failed_by.clear()
             try:
                 if self.item_ref.get("control_message"):
                     await self.item_ref["control_message"].delete()
@@ -773,6 +789,75 @@ async def activate_next_item_message(item):
         print(f"Erreur activation prochain média : {error}")
 
 
+def _active_playback_viewers_locked(now=None):
+    """Les clients qui ont interrogé l'API récemment et dont Live Chat est actif.
+
+    Appelé avec data_lock détenu. Un overlay fermé ne doit pas bloquer la file.
+    """
+    if now is None:
+        now = time.monotonic()
+    return {
+        user_id for user_id in active_users
+        if now - client_last_seen.get(user_id, 0.0) <= CLIENT_HEARTBEAT_TTL
+    }
+
+
+def _current_item_id_locked():
+    if not current_active_item:
+        return None
+    return str(
+        current_active_item.get("item_id")
+        or getattr(current_active_item.get("message_obj"), "id", current_active_item.get("url", ""))
+    )
+
+
+def _advance_shared_item_locked(log_reason):
+    """Avance la file pendant que data_lock est détenu; renvoie le nom suivant."""
+    global current_active_item, global_queue, last_pop_time
+    old_item = current_active_item
+    if old_item is None:
+        return None
+    old_item_id = _current_item_id_locked()
+
+    last_pop_time = time.time()
+    if old_item.get("control_message") and bot.loop and bot.loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(safe_delete_msg(old_item["control_message"]), bot.loop)
+        except RuntimeError as error:
+            print(f"[QUEUE] Suppression du contrôle différée impossible : {error}", flush=True)
+
+    if global_queue:
+        current_active_item = global_queue.pop(0)
+        if current_active_item.get("control_message") and bot.loop and bot.loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(activate_next_item_message(current_active_item), bot.loop)
+            except RuntimeError as error:
+                print(f"[QUEUE] Activation du contrôle suivant différée impossible : {error}", flush=True)
+        next_name = current_active_item.get("name")
+    else:
+        current_active_item = None
+        next_name = None
+
+    playback_finished_by.clear()
+    playback_failed_by.clear()
+    print(f"[QUEUE] Média {old_item_id or 'inconnu'} terminé — file avancée ({log_reason}).", flush=True)
+    return next_name
+
+
+def _advance_if_all_recent_viewers_reported_locked(now=None):
+    """Évite qu'un overlay fermé juste avant le dernier rapport bloque la file."""
+    if current_active_item is None:
+        return False
+    expected = _active_playback_viewers_locked(now)
+    if not expected:
+        return False
+    reported = (playback_finished_by | playback_failed_by) & expected
+    if expected.issubset(reported):
+        _advance_shared_item_locked("tous les overlays actifs ont fini ou sont devenus inactifs")
+        return True
+    return False
+
+
 @app.route("/get_next_meme", methods=["GET"])
 def get_next_meme():
     global current_active_item
@@ -787,6 +872,18 @@ def get_next_meme():
                 "game_mode": False,
                 "status": "inactive",
             })
+
+        # Présence client utilisée pour ne pas attendre un overlay fermé/crashé.
+        now_mono = time.monotonic()
+        client_last_seen[user_id] = now_mono
+        # Purge légère des anciens clients inactifs pour garder le dictionnaire borné.
+        for old_id, seen_at in list(client_last_seen.items()):
+            if old_id not in active_users and now_mono - seen_at > 600:
+                client_last_seen.pop(old_id, None)
+
+        # Si un overlay s'est fermé pendant que les autres attendaient, ses
+        # battements expirés permettent d'avancer au prochain GET, sans rester bloqué.
+        _advance_if_all_recent_viewers_reported_locked(now_mono)
 
         position = user_positions.get(user_id, "center")
         if position not in ("left", "center", "right"):
@@ -826,41 +923,68 @@ def get_next_meme():
 
 @app.route("/pop_meme", methods=["POST"])
 def pop_meme():
+    """Rapporte la fin locale d'un média partagé.
+
+    La file n'avance que lorsque tous les overlays actifs récemment vus ont fini
+    ou signalé qu'ils ne peuvent pas lire ce média. Une fin locale isolée ne coupe
+    donc plus la lecture des autres membres.
+    """
     global current_active_item, global_queue, last_pop_time
+    requested_name = request.args.get("user", "").strip()
     requested_item_id = request.args.get("item_id", "").strip()
+    reason = request.args.get("reason", "finished").strip().lower()
+    if reason not in ("finished", "failed"):
+        reason = "finished"
+    user_id = resolve_api_user(requested_name)
+
     with data_lock:
-        # Ignore un pop tardif d'un média terminé/remplacé : il ne doit pas avancer la file.
-        if requested_item_id:
-            current_item_id = None
-            if current_active_item:
-                current_item_id = str(
-                    current_active_item.get("item_id")
-                    or getattr(current_active_item.get("message_obj"), "id", current_active_item.get("url", ""))
-                )
-            if current_item_id != requested_item_id:
-                name = current_active_item["name"] if current_active_item else None
-                return jsonify({"status": "stale", "next": name, "current_item_id": current_item_id})
-
-        now = time.time()
-        if now - last_pop_time < 1.5:
+        current_item_id = _current_item_id_locked()
+        if requested_item_id and current_item_id != requested_item_id:
             name = current_active_item["name"] if current_active_item else None
-            return jsonify({"status": "ignored", "next": name})
+            return jsonify({
+                "status": "stale",
+                "next": name,
+                "current_item_id": current_item_id,
+            })
 
-        last_pop_time = now
-        if current_active_item:
-            if current_active_item.get("control_message"):
-                asyncio.run_coroutine_threadsafe(
-                    safe_delete_msg(current_active_item["control_message"]), bot.loop
-                )
-            if global_queue:
-                current_active_item = global_queue.pop(0)
-                asyncio.run_coroutine_threadsafe(
-                    activate_next_item_message(current_active_item), bot.loop
-                )
-            else:
-                current_active_item = None
-        name = current_active_item["name"] if current_active_item else None
-    return jsonify({"status": "success", "next": name})
+        if not current_active_item:
+            return jsonify({"status": "stale", "next": None, "current_item_id": None})
+
+        if user_id is None or user_id not in active_users:
+            return jsonify({"status": "inactive", "next": current_active_item.get("name")})
+
+        now_mono = time.monotonic()
+        client_last_seen[user_id] = now_mono
+        if reason == "failed":
+            playback_failed_by.add(user_id)
+            playback_finished_by.discard(user_id)
+        else:
+            playback_finished_by.add(user_id)
+            playback_failed_by.discard(user_id)
+
+        expected = _active_playback_viewers_locked(now_mono)
+        # Le demandeur doit compter même si son dernier poll date juste avant TTL.
+        expected.add(user_id)
+        reported = (playback_finished_by | playback_failed_by) & expected
+        pending = expected - reported
+
+        if pending:
+            print(
+                f"[QUEUE] Média {_current_item_id_locked()} : {len(reported)}/{len(expected)} "
+                f"clients terminés; attente de {len(pending)}.",
+                flush=True,
+            )
+            return jsonify({
+                "status": "waiting",
+                "next": current_active_item.get("name"),
+                "finished": len(reported),
+                "required": len(expected),
+                "pending": len(pending),
+            })
+
+        # Tous les clients actifs récemment vus ont fini ou signalé un échec.
+        next_name = _advance_shared_item_locked("tous les clients attendus ont fini ou échoué")
+        return jsonify({"status": "success", "next": next_name})
 
 
 async def safe_delete_msg(message):

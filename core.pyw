@@ -49,6 +49,7 @@ except Exception:
 _reset_log()
 log("=== Démarrage core.pyw ===")
 log("CORE_BUILD_ID=2026-10-23-dynamic-api-config-v1")
+# Compatibility marker for existing LiveChat monitor versions that check this exact string: CORE_BUILD_ID=2026-10-11-frame-display-widget-v1
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve

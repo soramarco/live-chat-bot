@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-17-video-repeat-guard-watchdog-v8")
+log("CORE_BUILD_ID=2026-10-23-dynamic-api-config-v1")
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
@@ -69,9 +69,56 @@ except Exception:
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "overlay_config_discord.txt")
 OLD_LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.lock")
-BASE_URL = "https://live-chat-bot-ctus.onrender.com"
+# L'API active est configurée dans api_base_url.txt à la racine de la branche main.
+# Le fallback Render permet un retour arrière si GitHub est momentanément inaccessible.
+API_CONFIG_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/api_base_url.txt"
+DEFAULT_BASE_URL = "https://live-chat-bot-ctus.onrender.com"
+BASE_URL = DEFAULT_BASE_URL
 SERVER_URL = BASE_URL + "/get_next_meme"
 POP_URL = BASE_URL + "/pop_meme"
+_API_CONFIG_REFRESH_SECONDS = 60.0
+_api_config_last_refresh = 0.0
+_api_config_error_logged = False
+
+
+def _refresh_api_base_url(force=False):
+    """Recharge l'URL de l'API depuis GitHub sans modifier le token Discord."""
+    global BASE_URL, SERVER_URL, POP_URL, _api_config_last_refresh, _api_config_error_logged
+    now = time.monotonic()
+    if not force and now - _api_config_last_refresh < _API_CONFIG_REFRESH_SECONDS:
+        return
+    _api_config_last_refresh = now
+    try:
+        response = requests.get(
+            API_CONFIG_URL,
+            params={"v": int(time.time() // 60)},
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+            timeout=4,
+        )
+        response.raise_for_status()
+        candidate = ""
+        for raw_line in response.text.splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#"):
+                candidate = line
+                break
+        parsed = urlparse(candidate)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or any(ch.isspace() for ch in candidate):
+            raise ValueError("api_base_url.txt doit contenir une URL http:// ou https:// valide")
+        candidate = candidate.rstrip("/")
+        if candidate != BASE_URL:
+            BASE_URL = candidate
+            SERVER_URL = BASE_URL + "/get_next_meme"
+            POP_URL = BASE_URL + "/pop_meme"
+            log(f"API distante mise à jour depuis GitHub : {BASE_URL}")
+        _api_config_error_logged = False
+    except Exception as error:
+        if force or not _api_config_error_logged:
+            log(f"Configuration API GitHub inaccessible; URL conservée ({BASE_URL}) : {type(error).__name__}: {error}")
+        _api_config_error_logged = True
+
+
+_refresh_api_base_url(force=True)
 
 VIDEO_EXTS = (
     ".mp4", ".m4v", ".mov", ".webm", ".avi", ".mkv", ".wmv",
@@ -843,6 +890,7 @@ class OverlayWindow(QWidget):
 
         while True:
             try:
+                _refresh_api_base_url()
                 res = session.get(SERVER_URL, params={"user": self.discord_pseudo}, timeout=10)
 
                 if res.status_code == 404:

@@ -5,6 +5,7 @@ import json
 import time
 import tempfile
 import sys
+import email.utils
 from threading import Thread
 
 import discord
@@ -20,7 +21,7 @@ except (AttributeError, OSError):
     pass
 
 app = Flask(__name__)
-BOT_BUILD_ID = "2026-10-17-shared-playback-dedupe-v2"
+BOT_BUILD_ID = "2026-10-22-cloudflare-cooldown-panel-throttle-v3"
 
 STORAGE_FILE = os.environ.get("BOT_STORAGE_FILE", "bot_storage.json")
 TARGET_CHANNEL_ID = 1544497366814560318  # Salon Discord Live Chat
@@ -35,6 +36,9 @@ user_game_modes = {}             # discord_user_id -> bool
 user_aliases = {}                # discord_user_id -> anciens/nouveaux noms utilisés par core.pyw
 panel_message = None
 panel_channel_id = None
+panel_last_moved_monotonic = 0.0
+panel_move_task = None
+PANEL_MOVE_MIN_INTERVAL = max(1.0, float(os.environ.get("PANEL_MOVE_MIN_INTERVAL", "3.0")))
 # Garde une seule réponse privée de réglages par utilisateur pendant que le bot tourne.
 # Les messages éphémères ne sont pas accessibles via l'historique du salon, donc on
 # conserve la référence retournée par Discord pour pouvoir la supprimer au prochain clic.
@@ -599,13 +603,45 @@ async def refresh_public_panel():
         await repost_bottom_panel(channel)
 
 
+async def _move_panel_after_cooldown(channel, delay):
+    """Regroupe les messages rapprochés puis déplace le panneau une fois la fenêtre passée."""
+    global panel_move_task
+    try:
+        await asyncio.sleep(max(0.0, delay))
+        await repost_bottom_panel(channel, move_to_bottom=True)
+    finally:
+        panel_move_task = None
+
+
 async def repost_bottom_panel(channel, move_to_bottom=False):
-    """Maintient un panneau public unique et neutre en bas du salon."""
-    global panel_message, panel_channel_id
+    """Maintient un panneau public unique en bas, sans le recréer à chaque message."""
+    global panel_message, panel_channel_id, panel_last_moved_monotonic, panel_move_task
     async with panel_update_lock:
         try:
             content = get_channel_panel_content()
             view = PublicControlView()
+
+            # Les messages ordinaires déclenchaient auparavant un nouveau panneau +
+            # des suppressions Discord à CHAQUE message. En période de forte activité,
+            # cela produit beaucoup d'appels REST inutiles et peut contribuer aux limites.
+            # Les mises à jour de statut (move_to_bottom=False) ne sont jamais ignorées.
+            elapsed_since_move = time.monotonic() - panel_last_moved_monotonic
+            if (
+                move_to_bottom
+                and panel_message is not None
+                and panel_channel_id == channel.id
+                and elapsed_since_move < PANEL_MOVE_MIN_INTERVAL
+            ):
+                # Un message supplémentaire arrive trop tôt : le déplacer dans une
+                # tâche différée conserve le panneau en bas en fin de rafale sans
+                # créer/supprimer un panneau pour chaque message.
+                if panel_move_task is None or panel_move_task.done():
+                    panel_move_task = asyncio.create_task(
+                        _move_panel_after_cooldown(
+                            channel, PANEL_MOVE_MIN_INTERVAL - elapsed_since_move
+                        )
+                    )
+                return True
 
             if move_to_bottom:
                 old_panels = []
@@ -624,6 +660,7 @@ async def repost_bottom_panel(channel, move_to_bottom=False):
                 new_panel = await channel.send(content=content, view=view)
                 panel_message = new_panel
                 panel_channel_id = channel.id
+                panel_last_moved_monotonic = time.monotonic()
                 for old_msg in old_panels:
                     if old_msg.id == new_panel.id:
                         continue
@@ -1011,6 +1048,19 @@ def run_flask():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 
+# Le délai est mémorisé pour qu'un redémarrage du processus ne relance pas
+# immédiatement une connexion après un blocage Cloudflare/429.
+# Pour survivre aux redéploiements Render, DISCORD_RETRY_STATE_FILE doit pointer
+# vers un stockage réellement persistant (par exemple /var/data avec un disque Render).
+DISCORD_RETRY_STATE_FILE = os.environ.get(
+    "DISCORD_RETRY_STATE_FILE", "discord_retry_state.json"
+)
+CLOUDFLARE_FALLBACK_COOLDOWN = max(
+    3600.0,
+    float(os.environ.get("DISCORD_CLOUDFLARE_FALLBACK_SECONDS", "21600")),
+)
+
+
 def _short_error_message(error, limit=240):
     """Évite d'inonder les logs avec la page HTML renvoyée par Cloudflare."""
     message = " ".join(str(error).split())
@@ -1020,33 +1070,134 @@ def _short_error_message(error, limit=240):
 
 
 def _retry_after_from_http_exception(error):
-    """Récupère Retry-After si Discord/Cloudflare le fournit."""
+    """Récupère Retry-After sous forme de secondes ou de date HTTP."""
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None)
     if not headers:
         return None
     value = headers.get("Retry-After") or headers.get("retry-after")
-    try:
-        return max(0.0, float(value)) if value is not None else None
-    except (TypeError, ValueError):
+    if value is None:
         return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_date = email.utils.parsedate_to_datetime(str(value))
+            if retry_date.tzinfo is None:
+                retry_date = retry_date.replace(tzinfo=__import__("datetime").timezone.utc)
+            return max(0.0, retry_date.timestamp() - time.time())
+        except Exception:
+            return None
+
+
+def _is_cloudflare_block(error):
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    text = str(getattr(error, "text", "") or error).lower()
+    server = str(headers.get("Server", headers.get("server", ""))).lower()
+    return (
+        getattr(error, "status", None) == 429
+        and (
+            "cloudflare" in text
+            or "error 1015" in text
+            or "1015" in text
+            or "cf-ray" in {str(k).lower() for k in headers.keys()}
+            or "cloudflare" in server
+        )
+    )
+
+
+def _load_discord_retry_deadline():
+    """Combine le délai enregistré et un verrou administrateur survivant aux redémarrages."""
+    try:
+        env_deadline = max(0.0, float(os.environ.get("DISCORD_RETRY_NOT_BEFORE_UNIX", "0") or 0))
+    except (TypeError, ValueError):
+        env_deadline = 0.0
+    try:
+        with open(DISCORD_RETRY_STATE_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        file_deadline = max(0.0, float(data.get("retry_until", 0.0)))
+    except FileNotFoundError:
+        file_deadline = 0.0
+    except Exception as error:
+        print(
+            f"[DISCORD] État de refroidissement illisible ({DISCORD_RETRY_STATE_FILE}): "
+            f"{type(error).__name__}: {error}", flush=True
+        )
+        file_deadline = 0.0
+    return max(env_deadline, file_deadline)
+
+
+def _save_discord_retry_deadline(deadline, reason):
+    try:
+        path = os.path.abspath(DISCORD_RETRY_STATE_FILE)
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix="discord_retry_", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                json.dump(
+                    {"retry_until": float(deadline), "reason": str(reason), "saved_at": time.time()},
+                    file,
+                    ensure_ascii=False,
+                )
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+        print(
+            f"[DISCORD] Délai de reprise enregistré jusqu'à "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(deadline))} "
+            f"dans {path}.", flush=True
+        )
+    except Exception as error:
+        print(
+            f"[DISCORD] AVERTISSEMENT : impossible de persister le délai de reprise : "
+            f"{type(error).__name__}: {error}. Le délai reste appliqué en mémoire.",
+            flush=True,
+        )
+
+
+def _clear_discord_retry_state():
+    try:
+        if os.path.isfile(DISCORD_RETRY_STATE_FILE):
+            os.remove(DISCORD_RETRY_STATE_FILE)
+            print("[DISCORD] Délai de reprise effacé après connexion réussie.", flush=True)
+    except Exception as error:
+        print(f"[DISCORD] Impossible d'effacer l'ancien délai : {error}", flush=True)
+
+
+async def _wait_until_retry_allowed():
+    deadline = _load_discord_retry_deadline()
+    remaining = deadline - time.time()
+    if remaining > 0:
+        print(
+            f"[DISCORD] Verrou de sécurité actif : aucune tentative pendant encore "
+            f"{int(remaining)} s. Flask reste disponible.", flush=True
+        )
+        await asyncio.sleep(remaining)
 
 
 async def run_discord_with_backoff(token):
-    """Keep Flask alive and retry Discord login without closing the reusable client."""
+    """Garde Flask disponible, respecte Retry-After et évite les reprises agressives."""
     delay = 60.0
-    max_backoff = 900.0  # 15 minutes; an explicit Retry-After may be longer
+    max_backoff = 900.0
+    await _wait_until_retry_allowed()
 
     while True:
         wait_seconds = delay
+        retry_reason = "discord_login_backoff"
         print(
-            f"[DISCORD] Tentative de connexion maintenant; prochaine attente de secours : {int(delay)} s.",
+            f"[DISCORD] Tentative de connexion; secours actuel : {int(delay)} s.",
             flush=True,
         )
         try:
             await bot.start(token, reconnect=True)
-            # Normally start() remains active until shutdown. Do not restart immediately
-            # if it returns; keep the retry cadence controlled.
             print("[DISCORD] bot.start() s'est terminé sans exception.", flush=True)
             wait_seconds = delay
         except asyncio.CancelledError:
@@ -1054,50 +1205,59 @@ async def run_discord_with_backoff(token):
         except discord.HTTPException as error:
             status = getattr(error, "status", None)
             retry_after = _retry_after_from_http_exception(error)
+            cloudflare_block = _is_cloudflare_block(error)
             if status == 429:
-                wait_seconds = max(delay, retry_after or 0.0)
+                if retry_after is not None and retry_after > 0:
+                    wait_seconds = max(delay, retry_after)
+                elif cloudflare_block:
+                    wait_seconds = max(delay, CLOUDFLARE_FALLBACK_COOLDOWN)
+                else:
+                    wait_seconds = max(delay, 300.0)
+                category = "Cloudflare / 1015" if cloudflare_block else "HTTP 429"
+                retry_reason = "cloudflare_429" if cloudflare_block else "http_429"
                 print(
-                    f"[DISCORD] HTTP 429 à la connexion (Discord/Cloudflare). "
-                    f"Nouvel essai dans {int(wait_seconds)} s. "
-                    f"Détail: {_short_error_message(error)}",
+                    f"[DISCORD] {category} à la connexion. Respect du refroidissement : "
+                    f"{int(wait_seconds)} s. Détail: {_short_error_message(error)}",
                     flush=True,
                 )
             else:
-                wait_seconds = max(delay, 300.0 if status in (401, 403) else 0.0)
+                # Les erreurs 401/403 répétées sont des requêtes invalides. Ne pas
+                # marteler l'API toutes les minutes si le secret ou les permissions sont faux.
+                wait_seconds = max(delay, 3600.0 if status in (401, 403) else 300.0)
                 print(
                     f"[DISCORD] Erreur HTTP de connexion (status={status}). "
-                    f"Nouvel essai dans {int(wait_seconds)} s. "
+                    f"Nouvel essai au plus tôt dans {int(wait_seconds)} s. "
                     f"Détail: {_short_error_message(error)}",
                     flush=True,
                 )
         except discord.LoginFailure as error:
-            wait_seconds = max(delay, 300.0)
+            wait_seconds = max(delay, 3600.0)
             print(
-                f"[DISCORD] Échec d'authentification. Vérifie le nom et la présence de "
-                f"DISCORD_TOKEN dans Render (valeur secrète non affichée). "
-                f"Nouvel essai dans {int(wait_seconds)} s. Détail: {_short_error_message(error)}",
+                f"[DISCORD] Échec d'authentification. Vérifie DISCORD_TOKEN dans Render. "
+                f"Nouvel essai au plus tôt dans {int(wait_seconds)} s. "
+                f"Détail: {_short_error_message(error)}",
                 flush=True,
             )
         except (OSError, asyncio.TimeoutError) as error:
             wait_seconds = delay
             print(
                 f"[DISCORD] Erreur réseau temporaire: {type(error).__name__}: {error}. "
-                f"Nouvel essai dans {int(wait_seconds)} s.",
-                flush=True,
+                f"Nouvel essai dans {int(wait_seconds)} s.", flush=True,
             )
         except Exception as error:
             wait_seconds = delay
             print(
-                f"[DISCORD] Erreur inattendue: {type(error).__name__}: {_short_error_message(error)}. "
-                f"Nouvel essai dans {int(wait_seconds)} s.",
+                f"[DISCORD] Erreur inattendue: {type(error).__name__}: "
+                f"{_short_error_message(error)}. Nouvel essai dans {int(wait_seconds)} s.",
                 flush=True,
             )
 
-        # Important: don't call bot.close() after a failed login. A closed discord.py
-        # Client cannot reliably be reused for the next attempt. An HTTP 429 response
-        # itself doesn't require destroying the Client; the next attempt reuses it.
+        deadline = time.time() + wait_seconds
+        if wait_seconds >= 300.0:
+            _save_discord_retry_deadline(deadline, retry_reason)
         print(
-            f"[DISCORD] Flask reste actif. Prochaine tentative dans {int(wait_seconds)} s.",
+            f"[DISCORD] Flask reste actif. Pas de nouvelle tentative avant "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(deadline))}.",
             flush=True,
         )
         await asyncio.sleep(wait_seconds)

@@ -48,7 +48,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-10-23-dynamic-api-config-v1")
+log("CORE_BUILD_ID=2026-11-07-text-message-overlay-v2")
 # Compatibility marker for existing LiveChat monitor versions that check this exact string: CORE_BUILD_ID=2026-10-11-frame-display-widget-v1
 
 try:
@@ -735,6 +735,7 @@ class OverlayWindow(QWidget):
         self.text_label = QLabel(self.container)
         self.text_label.setAlignment(Qt.AlignCenter)
         self.text_label.setWordWrap(True)
+        self.text_label.setTextFormat(Qt.PlainText)
         self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
         self.text_label.setStyleSheet("color: white;")
         self.text_label.setMaximumWidth(850)
@@ -944,16 +945,61 @@ class OverlayWindow(QWidget):
                 })
 
                 new_url = data.get("url")
+                item_type = str(data.get("item_type") or ("media" if new_url else "none")).lower()
+
+                # Un message texte n'a pas d'URL : il reste pourtant un élément
+                # de la file partagée et doit être acquitté via /pop_meme.
+                if item_type == "text":
+                    item_key = str(data.get("item_id") or "")
+                    if not item_key:
+                        log("Message texte ignoré : item_id absent")
+                        time.sleep(0.8)
+                        continue
+
+                    with self._network_state_lock:
+                        active_key = self._network_active_key
+                        last_done_key = self._network_last_done_key
+                        if item_key == active_key or item_key == last_done_key:
+                            should_fetch = False
+                            changed_item = False
+                        else:
+                            changed_item = active_key is not None and active_key != item_key
+                            self._network_active_key = item_key
+                            should_fetch = True
+
+                    if not should_fetch:
+                        time.sleep(0.9)
+                        continue
+
+                    if changed_item:
+                        log(f"Élément actif changé côté serveur ({active_key} -> {item_key}) : arrêt local de l'ancien")
+                        self.cancel_current_requested.emit()
+
+                    data["item_type"] = "text"
+                    data["item_id"] = item_key
+                    data["content_bytes"] = b""
+                    avatar_url = data.get("avatar", "")
+                    if avatar_url:
+                        try:
+                            avatar_res = session.get(avatar_url, timeout=5)
+                            if avatar_res.status_code == 200:
+                                data["avatar_bytes"] = avatar_res.content
+                        except Exception as avatar_error:
+                            log(f"Téléchargement de l'avatar du message ignoré : {avatar_error}")
+
+                    fail_url, fail_count = None, 0
+                    log(f"Message texte reçu ({len(str(data.get('content') or ''))} caractères), id={item_key}")
+                    self.media_ready.emit(data)
+                    continue
+
                 if not new_url:
                     # Aucune source active côté serveur : effacer l'ancien overlay.
                     # Ne pas envoyer /pop_meme ici : le serveur a déjà vidé la file.
                     with self._network_state_lock:
                         had_active = self._network_active_key is not None
                         self._network_active_key = None
-                        # Ne pas oublier le média terminé quand la file est vide :
-                        # un retour réseau périmé du même item doit rester ignoré.
                     if had_active:
-                        log("Le serveur n'a plus de média actif : arrêt local immédiat")
+                        log("Le serveur n'a plus d'élément actif : arrêt local immédiat")
                         self.cancel_current_requested.emit()
                     time.sleep(0.8)
                     continue
@@ -1230,18 +1276,23 @@ class OverlayWindow(QWidget):
     def handle_new_media(self, data):
         try:
             incoming_url = data.get("url")
+            item_type = str(data.get("item_type") or ("media" if incoming_url else "none")).lower()
             incoming_key = str(data.get("item_id") or incoming_url or "")
             if incoming_key and incoming_key == self._last_terminal_item_key:
-                log(f"Média dupliqué ignoré après sa fin/annulation : {incoming_key}")
+                log(f"Élément dupliqué ignoré après sa fin/annulation : {incoming_key}")
                 return
             if (incoming_key and incoming_key == self.current_loaded_item_key
                     and self.current_loaded_url is not None):
-                log(f"Événement de chargement dupliqué ignoré pour le média actif : {incoming_key}")
+                log(f"Événement de chargement dupliqué ignoré pour l'élément actif : {incoming_key}")
+                return
+            if item_type not in ("media", "text"):
+                log(f"Type d'élément non pris en charge : {item_type!r}")
                 return
 
             self.is_clearing = False
-            # Cet état est propre au thread graphique ; le thread réseau n'y touche plus.
-            self.current_loaded_url = incoming_url
+            # text:// sert de marqueur local : aucun téléchargement URL n'est tenté,
+            # mais la fin réutilise le même minuteur et le même quorum partagé.
+            self.current_loaded_url = incoming_url or (f"text://{incoming_key}" if item_type == "text" else None)
             self.current_loaded_item_key = incoming_key
             self._last_video_source_frame = QImage()
             self.media_player.stop()
@@ -1254,17 +1305,14 @@ class OverlayWindow(QWidget):
                 avatar_size = 40
 
             url = data.get("url")
-            if not url:
-                self.hide_overlay_ui()
-                return
-
             author = data.get("name", "")
-            meme_txt = data.get("content", "")
+            meme_txt = str(data.get("content", "") or "")
 
             if meme_txt:
                 self.text_label.setText(meme_txt)
                 self.text_label.show()
             else:
+                self.text_label.clear()
                 self.text_label.hide()
 
             avatar_source = None
@@ -1280,6 +1328,37 @@ class OverlayWindow(QWidget):
             if avatar_source is not None:
                 avatar_pix = create_discord_avatar_with_ring(avatar_source, size=avatar_size)
             self.header.set_content(self.current_author, avatar_pix, header_font)
+
+            # Message texte sans média : affiche auteur + texte, puis attend la
+            # même durée sur chaque overlay avant d'envoyer son rapport de fin.
+            if item_type == "text":
+                self.image_label.clear()
+                self.image_label.hide()
+                self.video_label.clear()
+                self.video_label.hide()
+                self.video_canvas.clear()
+                self.video_canvas.hide()
+                self.video_window.clear_frame()
+                self._current_image_pixmap = None
+                self._video_frames_received = 0
+                self._video_frames_shown = 0
+                self._cleanup_video_file()
+                self.text_label.setText(meme_txt)
+                self.text_label.show()
+                self.show_with_fade()
+                self.raise_()
+                try:
+                    display_duration = int(data.get("duration_ms") or 7500)
+                except (TypeError, ValueError):
+                    display_duration = 7500
+                display_duration = max(5000, min(15000, display_duration))
+                self.close_timer.start(display_duration)
+                log(f"Message texte affiché ({len(meme_txt)} caractères) pendant {display_duration} ms, id={incoming_key}")
+                return
+
+            if not url:
+                self.hide_overlay_ui()
+                return
 
             content = data.get("content_bytes") or b""
             self._current_image_pixmap = None

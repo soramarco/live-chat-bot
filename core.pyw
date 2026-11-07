@@ -7,6 +7,9 @@ import tempfile
 import threading
 import traceback
 import io
+import base64
+import subprocess
+from pathlib import Path
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import requests
@@ -48,7 +51,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-11-07-text-message-overlay-v2")
+log("CORE_BUILD_ID=2026-11-07-text-message-overlay-autostart-v3")
 # Compatibility marker for existing LiveChat monitor versions that check this exact string: CORE_BUILD_ID=2026-10-11-frame-display-widget-v1
 
 try:
@@ -1609,6 +1612,105 @@ class OverlayWindow(QWidget):
 
 
 
+
+# ---------------------------------------------------------------------------
+# DEMARRAGE AUTOMATIQUE WINDOWS
+# ---------------------------------------------------------------------------
+# Le core est lui-même un moniteur : il continue de sonder l'API Altare même
+# lorsque le Live Chat est inactif. Au prochain démarrage Windows, un petit
+# bootstrap met à jour core.pyw depuis GitHub puis le relance.
+_AUTOSTART_SHORTCUT_NAME = "Live Chat - moniteur.lnk"
+_AUTOSTART_DIR_NAME = "LiveChatOverlay"
+_AUTOSTART_HELPER_NAME = "live_chat_autostart.pyw"
+_AUTOSTART_CORE_NAME = "live_chat_core.pyw"
+_AUTOSTART_HELPER_CODE = '# -*- coding: utf-8 -*-\n"""Petit lanceur de démarrage Windows pour le Live Chat.\nTélécharge le dernier core.pyw depuis GitHub puis le démarre.\n"""\nimport os\nimport sys\nimport time\nimport subprocess\nimport urllib.request\nfrom pathlib import Path\n\nGITHUB_CORE_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/core.pyw"\nDATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LiveChatOverlay"\nCORE_PATH = DATA_DIR / "live_chat_core.pyw"\nLOG_PATH = Path.home() / "live_chat_autostart.log"\n\ndef log(message):\n    try:\n        with LOG_PATH.open("a", encoding="utf-8") as stream:\n            stream.write(time.strftime("%H:%M:%S ") + str(message) + "\\n")\n    except Exception:\n        pass\n\ndef main():\n    DATA_DIR.mkdir(parents=True, exist_ok=True)\n    try:\n        request = urllib.request.Request(\n            GITHUB_CORE_URL + "?startup=" + str(int(time.time())),\n            headers={"Cache-Control": "no-cache", "Pragma": "no-cache", "User-Agent": "LiveChatOverlay/1.0"},\n        )\n        with urllib.request.urlopen(request, timeout=18) as response:\n            content = response.read()\n        if not content or b"class OverlayWindow" not in content or b"CORE_BUILD_ID=" not in content:\n            raise RuntimeError("core.pyw téléchargé invalide")\n        temporary = CORE_PATH.with_suffix(".pyw.download")\n        temporary.write_bytes(content)\n        os.replace(temporary, CORE_PATH)\n        log(f"Core actualisé depuis GitHub ({len(content)} octets)")\n    except Exception as exc:\n        if not CORE_PATH.exists() or CORE_PATH.stat().st_size < 10000:\n            log(f"Téléchargement GitHub impossible et aucun cache valide : {exc}")\n            return 1\n        log(f"GitHub inaccessible, utilisation du core en cache : {exc}")\n    current = Path(sys.executable)\n    pythonw = current.with_name("pythonw.exe") if current.name.lower() == "python.exe" else current\n    if not pythonw.exists():\n        pythonw = current\n    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)\n    subprocess.Popen([str(pythonw), str(CORE_PATH)], cwd=str(DATA_DIR),\n                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n                     close_fds=True, creationflags=flags)\n    log("core.pyw démarré automatiquement avec Windows")\n    return 0\n\nif __name__ == "__main__":\n    try:\n        raise SystemExit(main())\n    except Exception as exc:\n        log(f"Erreur du démarrage automatique : {type(exc).__name__}: {exc}")\n        raise\n'
+
+
+def ensure_windows_autostart():
+    """Ajoute ou répare le raccourci Windows, sans installer un second programme.
+
+    Si l'ancien launcher avait déjà créé « Live Chat - moniteur.lnk », on réutilise
+    ce raccourci et on le redirige vers le bootstrap Altare/GitHub. Sinon, on demande
+    une seule fois l'autorisation de l'utilisateur.
+    """
+    if os.name != "nt":
+        return False
+    appdata = os.environ.get("APPDATA")
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if not appdata or not localappdata:
+        log("Démarrage automatique ignoré : APPDATA/LOCALAPPDATA absent")
+        return False
+
+    startup_dir = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    shortcut = startup_dir / _AUTOSTART_SHORTCUT_NAME
+    data_dir = Path(localappdata) / _AUTOSTART_DIR_NAME
+    helper = data_dir / _AUTOSTART_HELPER_NAME
+    stable_core = data_dir / _AUTOSTART_CORE_NAME
+    had_existing_shortcut = shortcut.exists()
+
+    if not had_existing_shortcut:
+        answer = QMessageBox.question(
+            None,
+            "Live Chat au démarrage de Windows",
+            "Veux-tu que le Live Chat se relance automatiquement quand tu allumes ton PC ?\n\n"
+            "Le pseudo sera conservé et prérempli. Le programme vérifiera ton statut Discord "
+            "sur Altare et affichera l'overlay seulement lorsque ton Live Chat est activé.\n\n"
+            "Tu pourras retirer ce démarrage à tout moment depuis le dossier Démarrage de Windows.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            log("Démarrage automatique Windows refusé")
+            return False
+
+    try:
+        startup_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        # Conserver une copie de secours du core actuellement exécuté.
+        running_core = Path(__file__).resolve()
+        if running_core.exists():
+            temp_core = stable_core.with_suffix(".pyw.tmp")
+            temp_core.write_bytes(running_core.read_bytes())
+            os.replace(temp_core, stable_core)
+        temp_helper = helper.with_suffix(".pyw.tmp")
+        temp_helper.write_text(_AUTOSTART_HELPER_CODE, encoding="utf-8")
+        os.replace(temp_helper, helper)
+
+        current = Path(sys.executable)
+        pythonw = current.with_name("pythonw.exe") if current.name.lower() == "python.exe" else current
+        if not pythonw.exists():
+            pythonw = current
+        shortcut_ps = str(shortcut).replace("'", "''")
+        python_ps = str(pythonw).replace("'", "''")
+        helper_ps = str(helper.resolve()).replace("'", "''")
+        working_ps = str(data_dir.resolve()).replace("'", "''")
+        ps = (
+            "$ws = New-Object -ComObject WScript.Shell; "
+            f"$sc = $ws.CreateShortcut('{shortcut_ps}'); "
+            f"$sc.TargetPath = '{python_ps}'; "
+            f"$sc.Arguments = '\"{helper_ps}\"'; "
+            f"$sc.WorkingDirectory = '{working_ps}'; "
+            "$sc.WindowStyle = 7; $sc.Save()"
+        )
+        encoded = base64.b64encode(ps.encode("utf-16le")).decode("ascii")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=15,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode == 0 and shortcut.exists():
+            log(f"Démarrage automatique Windows configuré : {shortcut}")
+            return True
+        detail = result.stderr.decode("utf-8", "replace")
+        log(f"Échec création/réparation du raccourci Windows : {detail}")
+        return False
+    except Exception:
+        log("Configuration du démarrage automatique impossible :\n" + traceback.format_exc())
+        return False
+
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -1631,6 +1733,7 @@ def main():
         return 0
 
     log(f"Pseudo : {setup.pseudo}")
+    ensure_windows_autostart()
     overlay = OverlayWindow(setup.pseudo)
     overlay.quit_requested.connect(app.quit)
     overlay.show()

@@ -51,7 +51,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-11-07-text-message-overlay-autostart-v3")
+log("CORE_BUILD_ID=2026-11-07-text-wrap-readtime-faststart-v4")
 # Compatibility marker for existing LiveChat monitor versions that check this exact string: CORE_BUILD_ID=2026-10-11-frame-display-widget-v1
 
 try:
@@ -76,12 +76,12 @@ OLD_LOCK_FILE = os.path.join(tempfile.gettempdir(), "live_chat_overlay_running.l
 # L'API active est configurée dans api_base_url.txt à la racine de la branche main.
 # Le fallback Render permet un retour arrière si GitHub est momentanément inaccessible.
 API_CONFIG_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/api_base_url.txt"
-DEFAULT_BASE_URL = "https://live-chat-bot-ctus.onrender.com"
+DEFAULT_BASE_URL = "http://kg-bsz01.altare.global:25307"
 BASE_URL = DEFAULT_BASE_URL
 SERVER_URL = BASE_URL + "/get_next_meme"
 POP_URL = BASE_URL + "/pop_meme"
 _API_CONFIG_REFRESH_SECONDS = 60.0
-_api_config_last_refresh = 0.0
+_api_config_last_refresh = time.monotonic()  # Première lecture API immédiate; config GitHub après le lancement.
 _api_config_error_logged = False
 
 
@@ -122,7 +122,7 @@ def _refresh_api_base_url(force=False):
         _api_config_error_logged = True
 
 
-_refresh_api_base_url(force=True)
+log(f"API initiale rapide : {BASE_URL}; actualisation GitHub différée")
 
 VIDEO_EXTS = (
     ".mp4", ".m4v", ".mov", ".webm", ".avi", ".mkv", ".wmv",
@@ -621,6 +621,57 @@ class OpaqueVideoWindow(QWidget):
         painter.end()
 
 
+def wrap_overlay_text(text, font, max_width):
+    """Wrap text using actual font widths, including tokens with no spaces."""
+    metrics = QFontMetrics(font)
+
+    def text_width(value):
+        try:
+            return metrics.horizontalAdvance(value)
+        except AttributeError:
+            return metrics.width(value)
+
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    output_lines = []
+    for paragraph in normalized.split("\n"):
+        if paragraph == "":
+            output_lines.append("")
+            continue
+
+        words = paragraph.split()
+        if not words:
+            output_lines.append("")
+            continue
+
+        current_line = ""
+        for word in words:
+            candidate = f"{current_line} {word}" if current_line else word
+            if text_width(candidate) <= max_width:
+                current_line = candidate
+                continue
+
+            if current_line:
+                output_lines.append(current_line)
+                current_line = ""
+
+            # A long URL or repeated letters may contain no spaces. Split it
+            # by rendered width rather than allowing QLabel to cut it off.
+            chunk = ""
+            for character in word:
+                candidate_chunk = chunk + character
+                if chunk and text_width(candidate_chunk) > max_width:
+                    output_lines.append(chunk)
+                    chunk = character
+                else:
+                    chunk = candidate_chunk
+            current_line = chunk
+
+        if current_line or not output_lines:
+            output_lines.append(current_line)
+
+    return "\n".join(output_lines)
+
+
 # ---------------------------------------------------------------------------
 # OVERLAY
 # ---------------------------------------------------------------------------
@@ -652,6 +703,7 @@ class OverlayWindow(QWidget):
         self.current_avatar_source = None
         self._current_image_pixmap = None
         self.current_loaded_item_key = None
+        self.current_text_content = ""
         # État suivi uniquement par le thread de polling, avec accès protégé.
         # On observe les changements du serveur même pendant une lecture :
         # Stop/avance en file doit interrompre le média affiché immédiatement.
@@ -742,6 +794,7 @@ class OverlayWindow(QWidget):
         self.text_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
         self.text_label.setStyleSheet("color: white;")
         self.text_label.setMaximumWidth(850)
+        self.text_label.setMinimumSize(0, 0)
         shadow_text = QGraphicsDropShadowEffect()
         shadow_text.setBlurRadius(3)
         shadow_text.setColor(QColor(0, 0, 0, 255))
@@ -757,6 +810,62 @@ class OverlayWindow(QWidget):
         self.close_timer = QTimer(self)
         self.close_timer.setSingleShot(True)
         self.close_timer.timeout.connect(self.finish_media_playback)
+
+    def set_overlay_message_text(self, text):
+        """Show the complete message, wrapped to the overlay width and screen height."""
+        self.current_text_content = str(text or "")
+        if not self.current_text_content:
+            self.text_label.clear()
+            self.text_label.setMinimumSize(0, 0)
+            self.text_label.setMaximumSize(16777215, 16777215)
+            self.text_label.setMaximumWidth(850)
+            return
+
+        game_mode = bool(self.current_game_mode)
+        max_width = 380 if game_mode else 850
+        base_size = 15 if game_mode else 24
+        min_size = 9
+        try:
+            screen_height = QApplication.primaryScreen().availableGeometry().height()
+        except Exception:
+            screen_height = 900
+        max_height = max(260, int(screen_height * 0.68))
+
+        chosen_height = 0
+        chosen_font = None
+        chosen_text = self.current_text_content
+        for point_size in range(base_size, min_size - 1, -1):
+            font = QFont("Segoe UI", point_size, QFont.Bold)
+            wrapped = wrap_overlay_text(self.current_text_content, font, max_width - 28)
+            metrics = QFontMetrics(font)
+            line_count = max(1, len(wrapped.split("\n")))
+            required_height = line_count * metrics.lineSpacing() + 20
+            chosen_font = font
+            chosen_text = wrapped
+            chosen_height = required_height
+            if required_height <= max_height:
+                break
+
+        self.text_label.setFont(chosen_font)
+        self.text_label.setWordWrap(True)
+        self.text_label.setTextFormat(Qt.PlainText)
+        self.text_label.setMinimumWidth(max_width)
+        self.text_label.setMaximumWidth(max_width)
+        self.text_label.setFixedWidth(max_width)
+        self.text_label.setMinimumHeight(0)
+        self.text_label.setMaximumHeight(max_height)
+        self.text_label.setText(chosen_text)
+        self.text_label.adjustSize()
+        self.text_label.setFixedHeight(min(chosen_height, max_height))
+        if self.container.layout() is not None:
+            self.container.layout().activate()
+        self.container.adjustSize()
+        self.main_layout.activate()
+        log(
+            f"Texte mis en page : {len(self.current_text_content)} caractères, "
+            f"{len(chosen_text.split(chr(10)))} lignes, police={chosen_font.pointSize()} pt, "
+            f"largeur={max_width}px, hauteur={min(chosen_height, max_height)}px"
+        )
 
     def show_with_fade(self):
         """Fondu local des widgets, sans animer l'opacité de la fenêtre Windows."""
@@ -984,7 +1093,7 @@ class OverlayWindow(QWidget):
                     avatar_url = data.get("avatar", "")
                     if avatar_url:
                         try:
-                            avatar_res = session.get(avatar_url, timeout=5)
+                            avatar_res = session.get(avatar_url, timeout=(0.8, 1.2))
                             if avatar_res.status_code == 200:
                                 data["avatar_bytes"] = avatar_res.content
                         except Exception as avatar_error:
@@ -1260,6 +1369,9 @@ class OverlayWindow(QWidget):
         if self.container.layout() is not None:
             self.container.layout().activate()
 
+        if self.current_text_content:
+            self.set_overlay_message_text(self.current_text_content)
+
         if self.current_author:
             avatar = None
             if self.current_avatar_source is not None and not self.current_avatar_source.isNull():
@@ -1312,10 +1424,10 @@ class OverlayWindow(QWidget):
             meme_txt = str(data.get("content", "") or "")
 
             if meme_txt:
-                self.text_label.setText(meme_txt)
+                self.set_overlay_message_text(meme_txt)
                 self.text_label.show()
             else:
-                self.text_label.clear()
+                self.set_overlay_message_text("")
                 self.text_label.hide()
 
             avatar_source = None
@@ -1346,15 +1458,14 @@ class OverlayWindow(QWidget):
                 self._video_frames_received = 0
                 self._video_frames_shown = 0
                 self._cleanup_video_file()
-                self.text_label.setText(meme_txt)
                 self.text_label.show()
                 self.show_with_fade()
                 self.raise_()
                 try:
-                    display_duration = int(data.get("duration_ms") or 7500)
+                    display_duration = int(data.get("duration_ms") or 8000)
                 except (TypeError, ValueError):
-                    display_duration = 7500
-                display_duration = max(5000, min(15000, display_duration))
+                    display_duration = 8000
+                display_duration = max(8000, min(30000, display_duration))
                 self.close_timer.start(display_duration)
                 log(f"Message texte affiché ({len(meme_txt)} caractères) pendant {display_duration} ms, id={incoming_key}")
                 return
@@ -1597,6 +1708,10 @@ class OverlayWindow(QWidget):
         self.image_label.hide()
         self.header.clear_content()
         self.text_label.clear()
+        self.current_text_content = ""
+        self.text_label.setMinimumSize(0, 0)
+        self.text_label.setMaximumSize(16777215, 16777215)
+        self.text_label.setMaximumWidth(850)
         self.container.hide()
         self._cleanup_video_file()
         self.current_author = ""
@@ -1623,7 +1738,7 @@ _AUTOSTART_SHORTCUT_NAME = "Live Chat - moniteur.lnk"
 _AUTOSTART_DIR_NAME = "LiveChatOverlay"
 _AUTOSTART_HELPER_NAME = "live_chat_autostart.pyw"
 _AUTOSTART_CORE_NAME = "live_chat_core.pyw"
-_AUTOSTART_HELPER_CODE = '# -*- coding: utf-8 -*-\n"""Petit lanceur de démarrage Windows pour le Live Chat.\nTélécharge le dernier core.pyw depuis GitHub puis le démarre.\n"""\nimport os\nimport sys\nimport time\nimport subprocess\nimport urllib.request\nfrom pathlib import Path\n\nGITHUB_CORE_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/core.pyw"\nDATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LiveChatOverlay"\nCORE_PATH = DATA_DIR / "live_chat_core.pyw"\nLOG_PATH = Path.home() / "live_chat_autostart.log"\n\ndef log(message):\n    try:\n        with LOG_PATH.open("a", encoding="utf-8") as stream:\n            stream.write(time.strftime("%H:%M:%S ") + str(message) + "\\n")\n    except Exception:\n        pass\n\ndef main():\n    DATA_DIR.mkdir(parents=True, exist_ok=True)\n    try:\n        request = urllib.request.Request(\n            GITHUB_CORE_URL + "?startup=" + str(int(time.time())),\n            headers={"Cache-Control": "no-cache", "Pragma": "no-cache", "User-Agent": "LiveChatOverlay/1.0"},\n        )\n        with urllib.request.urlopen(request, timeout=18) as response:\n            content = response.read()\n        if not content or b"class OverlayWindow" not in content or b"CORE_BUILD_ID=" not in content:\n            raise RuntimeError("core.pyw téléchargé invalide")\n        temporary = CORE_PATH.with_suffix(".pyw.download")\n        temporary.write_bytes(content)\n        os.replace(temporary, CORE_PATH)\n        log(f"Core actualisé depuis GitHub ({len(content)} octets)")\n    except Exception as exc:\n        if not CORE_PATH.exists() or CORE_PATH.stat().st_size < 10000:\n            log(f"Téléchargement GitHub impossible et aucun cache valide : {exc}")\n            return 1\n        log(f"GitHub inaccessible, utilisation du core en cache : {exc}")\n    current = Path(sys.executable)\n    pythonw = current.with_name("pythonw.exe") if current.name.lower() == "python.exe" else current\n    if not pythonw.exists():\n        pythonw = current\n    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)\n    subprocess.Popen([str(pythonw), str(CORE_PATH)], cwd=str(DATA_DIR),\n                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n                     close_fds=True, creationflags=flags)\n    log("core.pyw démarré automatiquement avec Windows")\n    return 0\n\nif __name__ == "__main__":\n    try:\n        raise SystemExit(main())\n    except Exception as exc:\n        log(f"Erreur du démarrage automatique : {type(exc).__name__}: {exc}")\n        raise\n'
+_AUTOSTART_HELPER_CODE = '# -*- coding: utf-8 -*-\n"""Petit lanceur de démarrage Windows pour le Live Chat.\nTélécharge le dernier core.pyw depuis GitHub puis le démarre.\n"""\nimport os\nimport sys\nimport time\nimport subprocess\nimport urllib.request\nfrom pathlib import Path\n\nGITHUB_CORE_URL = "https://raw.githubusercontent.com/soramarco/live-chat-bot/main/core.pyw"\nDATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LiveChatOverlay"\nCORE_PATH = DATA_DIR / "live_chat_core.pyw"\nLOG_PATH = Path.home() / "live_chat_autostart.log"\n\ndef log(message):\n    try:\n        with LOG_PATH.open("a", encoding="utf-8") as stream:\n            stream.write(time.strftime("%H:%M:%S ") + str(message) + "\\n")\n    except Exception:\n        pass\n\ndef main():\n    DATA_DIR.mkdir(parents=True, exist_ok=True)\n    try:\n        request = urllib.request.Request(\n            GITHUB_CORE_URL + "?startup=" + str(int(time.time())),\n            headers={"Cache-Control": "no-cache", "Pragma": "no-cache", "User-Agent": "LiveChatOverlay/1.0"},\n        )\n        with urllib.request.urlopen(request, timeout=5) as response:\n            content = response.read()\n        if not content or b"class OverlayWindow" not in content or b"CORE_BUILD_ID=" not in content:\n            raise RuntimeError("core.pyw téléchargé invalide")\n        temporary = CORE_PATH.with_suffix(".pyw.download")\n        temporary.write_bytes(content)\n        os.replace(temporary, CORE_PATH)\n        log(f"Core actualisé depuis GitHub ({len(content)} octets)")\n    except Exception as exc:\n        if not CORE_PATH.exists() or CORE_PATH.stat().st_size < 10000:\n            log(f"Téléchargement GitHub impossible et aucun cache valide : {exc}")\n            return 1\n        log(f"GitHub inaccessible, utilisation du core en cache : {exc}")\n    current = Path(sys.executable)\n    pythonw = current.with_name("pythonw.exe") if current.name.lower() == "python.exe" else current\n    if not pythonw.exists():\n        pythonw = current\n    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)\n    subprocess.Popen([str(pythonw), str(CORE_PATH)], cwd=str(DATA_DIR),\n                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n                     close_fds=True, creationflags=flags)\n    log("core.pyw démarré automatiquement avec Windows")\n    return 0\n\nif __name__ == "__main__":\n    try:\n        raise SystemExit(main())\n    except Exception as exc:\n        log(f"Erreur du démarrage automatique : {type(exc).__name__}: {exc}")\n        raise\n'
 
 
 def ensure_windows_autostart():

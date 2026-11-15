@@ -51,13 +51,13 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-11-15-setup-dialog-foreground-v5")
+log("CORE_BUILD_ID=2026-11-15-rounded-media-r25-v6")
 # Compatibility marker for existing LiveChat monitor versions that check this exact string: CORE_BUILD_ID=2026-10-11-frame-display-widget-v1
 
 try:
     from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
     from PyQt5.QtGui import (
-        QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics,
+        QFont, QColor, QPainter, QBrush, QPainterPath, QPixmap, QImage, QPen, QFontMetrics, QRegion,
     )
     from PyQt5.QtWidgets import (
         QApplication, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
@@ -523,6 +523,13 @@ class FrameDisplayWidget(QWidget):
         x = (self.width() - target_size.width()) // 2
         y = (self.height() - target_size.height()) // 2
         target = QRectF(x, y, target_size.width(), target_size.height())
+        # Tous les médias image sont découpés avec un rayon de 25 px minimum
+        # (réduit uniquement si la dimension du média est trop petite).
+        radius = min(25.0, target.width() / 2.0, target.height() / 2.0)
+        rounded_path = QPainterPath()
+        rounded_path.addRoundedRect(target, radius, radius)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setClipPath(rounded_path)
 
         if self._paint_opacity >= 0.999:
             # En régime normal, remplacer directement les pixels de l'image.
@@ -541,6 +548,35 @@ class FrameDisplayWidget(QWidget):
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
             painter.setOpacity(self._paint_opacity)
             painter.drawImage(target, self._image)
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
+# LABEL VIDEO AVEC COINS ARRONDIS (MODE JEU)
+# ---------------------------------------------------------------------------
+class RoundedVideoLabel(QLabel):
+    """Dessine la pixmap vidéo centrée et découpée avec un rayon de 25 px."""
+    CORNER_RADIUS = 25.0
+
+    def paintEvent(self, event):
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        # Reproduit l'alignement centré de QLabel sans laisser dépasser les coins.
+        size = pixmap.size().scaled(self.size(), Qt.KeepAspectRatio)
+        x = (self.width() - size.width()) / 2.0
+        y = (self.height() - size.height()) / 2.0
+        target = QRectF(x, y, size.width(), size.height())
+        radius = min(self.CORNER_RADIUS, target.width() / 2.0, target.height() / 2.0)
+        rounded_path = QPainterPath()
+        rounded_path.addRoundedRect(target, radius, radius)
+        painter.setClipPath(rounded_path)
+        painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
         painter.end()
 
 
@@ -623,6 +659,7 @@ class OpaqueVideoWindow(QWidget):
                  Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
         super().__init__(None, flags)
         self._frame = QImage()
+        self._round_mask_size = QSize()
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WA_NativeWindow, True)
@@ -643,6 +680,8 @@ class OpaqueVideoWindow(QWidget):
         geometry_changed = self.geometry() != geometry
         if geometry_changed:
             self.setGeometry(geometry)
+        if geometry_changed or self._round_mask_size != self.size():
+            self._update_rounded_mask()
         if not self.isVisible():
             self.show()
             self.raise_()
@@ -656,8 +695,25 @@ class OpaqueVideoWindow(QWidget):
         self.hide()
         self.update()
 
+    def _update_rounded_mask(self):
+        """Découpe la fenêtre native elle-même pour laisser les coins transparents."""
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        radius = min(25.0, self.width() / 2.0, self.height() / 2.0)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), radius, radius)
+        # Le masque Windows suit le même contour que le clipping anti-crénelé peint.
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        self._round_mask_size = self.size()
+
     def paintEvent(self, event):
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        radius = min(25.0, self.width() / 2.0, self.height() / 2.0)
+        rounded_path = QPainterPath()
+        rounded_path.addRoundedRect(QRectF(self.rect()), radius, radius)
+        painter.setClipPath(rounded_path)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
         painter.fillRect(event.rect(), QColor(0, 0, 0, 255))
         if not self._frame.isNull():
@@ -665,7 +721,6 @@ class OpaqueVideoWindow(QWidget):
                 # La frame est déjà à la taille exacte de la fenêtre : pas de redimensionnement.
                 painter.drawImage(0, 0, self._frame)
             else:
-                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 painter.drawImage(self.rect(), self._frame)
         painter.end()
 
@@ -802,7 +857,7 @@ class OverlayWindow(QWidget):
         # ses pixels en semi-transparence (visible seulement au screenshot).
         # En mode jeu, on conserve le rendu compact déjà fonctionnel.
         # Mode jeu : conserver le QLabel natif qui fonctionnait déjà.
-        self.video_label = QLabel(self.container)
+        self.video_label = RoundedVideoLabel(self.container)
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet("background: transparent; border: none;")
         self.video_label.setAutoFillBackground(False)

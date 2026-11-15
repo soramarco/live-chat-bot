@@ -51,7 +51,7 @@ except Exception:
 
 _reset_log()
 log("=== Démarrage core.pyw ===")
-log("CORE_BUILD_ID=2026-11-07-text-wrap-readtime-faststart-v4")
+log("CORE_BUILD_ID=2026-11-15-setup-dialog-foreground-v5")
 # Compatibility marker for existing LiveChat monitor versions that check this exact string: CORE_BUILD_ID=2026-10-11-frame-display-widget-v1
 
 try:
@@ -221,10 +221,59 @@ def acquire_single_instance():
 # FENETRE DE CONFIGURATION DU PSEUDO
 # ---------------------------------------------------------------------------
 class SetupDialog(QDialog):
+    """Fenêtre de saisie du pseudo : mise au premier plan au démarrage, sans topmost."""
     def __init__(self):
         super().__init__()
         self.pseudo = None
+        # Cette fenêtre est une boîte de dialogue normale : elle ne reste PAS
+        # au-dessus des autres applications comme l'overlay.
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
+        self.setWindowModality(Qt.ApplicationModal)
         self.init_ui()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Au démarrage automatique de Windows, la première demande d'activation
+        # Qt peut arriver trop tôt. Deux nouvelles tentatives couvrent ce délai.
+        QTimer.singleShot(0, self._activate_for_initial_entry)
+        QTimer.singleShot(180, self._activate_for_initial_entry)
+        QTimer.singleShot(500, self._activate_for_initial_entry)
+
+    def _activate_for_initial_entry(self):
+        """Active la boîte de dialogue une fois, sans la rendre toujours au-dessus."""
+        if not self.isVisible():
+            return
+        try:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            QApplication.setActiveWindow(self)
+            self.input_field.setFocus(Qt.ActiveWindowFocusReason)
+        except Exception:
+            log("Activation Qt de la fenêtre de pseudo impossible :\n" + traceback.format_exc())
+
+        # Windows peut laisser une application lancée au démarrage derrière les
+        # fenêtres déjà ouvertes. On demande le premier plan à Win32 sans utiliser
+        # HWND_TOPMOST : la boîte reste une fenêtre normale après son activation.
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+                user32.BringWindowToTop.argtypes = [wintypes.HWND]
+                user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+                hwnd = wintypes.HWND(int(self.winId()))
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.BringWindowToTop(hwnd)
+                foreground_ok = bool(user32.SetForegroundWindow(hwnd))
+                if foreground_ok:
+                    log("Fenêtre de saisie du pseudo activée au premier plan (sans topmost)")
+                else:
+                    log("Windows a refusé SetForegroundWindow pour la saisie du pseudo")
+                self.input_field.setFocus(Qt.ActiveWindowFocusReason)
+            except Exception:
+                log("Activation Win32 de la fenêtre de pseudo impossible :\n" + traceback.format_exc())
 
     def init_ui(self):
         self.setWindowTitle("Configuration de l'Overlay Mème")
